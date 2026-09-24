@@ -163,10 +163,15 @@
   （窗口自己渲染，别人的窗口盖不住），拿不到或整幅单色才回退 `ImageGrab` + topmost。
   返回值带 `[printwindow]` / `[screengrab]` 标记。新增 `logs/gui_shot_layout.png`
   （跑完的完整界面，无弹窗遮挡）。
-* **开发文档**：README §5 项目结构（含"改哪个文件"表 + `core/`/`cli/` 禁改清单）、
-  §12 开发与调试指南（`--dev` 模式、DevTools、验收顺序、VSCode 插件与配置）；
+* **开发文档**：`docs/DEVELOPER_GUIDE.md` §5 项目结构（含"改哪个文件"表 + `core/`/`cli/`
+  禁改清单）、§12 开发与调试指南（`--dev` 模式、DevTools、验收顺序、VSCode 插件与配置）；
   新增 `.vscode/{extensions,settings,launch}.json`；`gui/desktop.py --dev`
   （固定 8756 端口 + `vite.config.js` 代理 `/api` + `webview.start(debug=True)`）。
+  **2026-09-24 目录改版**：仓库根的 `README.md` / `README.en.md` 换成**面向使用者的首页**
+  （功能特性 / 下载与 Full-Minimal 选择 / 五步上手 / 界面预览 / 进阶选项 / 注意事项 / 项目结构 /
+  社区 / 许可），原来自述型的全文（CLI 用法、判据、原理、体积、GUI 各轮、开发指南、图集）
+  原样移到 **`docs/DEVELOPER_GUIDE.md`** 与 **`docs/DEVELOPER_GUIDE.en.md`**（内部
+  `docs/images/` 路径已改成 `images/`）；`docs/README.md` 是新的文档索引。
 * **文件梳理（待用户确认后才执行）**：`docs/cleanup_plan_20260924.md` +
   `scripts/clean.ps1`（默认 dry-run，`-Apply` 才删；实测可释放 **3.46 GB**）+
   `scripts/check_dist.ps1`（交付 Kit 文件清单校验）。
@@ -228,7 +233,7 @@
   **绝不弹 PyInstaller 模态崩溃框**；② **无控制台启动** `--headless`（uvicorn 必须在
   `sys.stdout is None` 下也能配好日志）；③ 冻结 exe 的 `--selftest --selftest-ui --selftest-shell`
   （rc=0、`ui driven ok=True`、**A0~A7 全 True**、原生对话框 `appeared=True after=0.46s`）。
-  **本轮抓到两个"只在打包后出现"的真 bug，源码模式全绿也照样中招**（成因/修法见 README §10.5）：
+  **本轮抓到两个"只在打包后出现"的真 bug，源码模式全绿也照样中招**（成因/修法见 `docs/DEVELOPER_GUIDE.md` §10.5）：
   ① `--windowed` exe 由资源管理器双击时 `sys.stdout/stderr is None`，`uvicorn` 的日志 formatter
   调 `sys.stdout.isatty()` → `AttributeError` → `Unable to configure formatter 'default'`
   ⇒ **uvicorn 根本起不来，界面永远不出现**，只剩一个模态崩溃框（用 `subprocess` 启动会继承
