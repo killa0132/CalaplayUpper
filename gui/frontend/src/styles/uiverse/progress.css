@@ -1,0 +1,141 @@
+/* ==========================================================================
+   Bottom progress bar.
+   The head is chongci.gif itself, riding the leading edge of the fill.  The
+   GIF animates between two hues -- cream-gold #F7E78D and cyan #7DD7E4 (palette
+   sampled from the file) -- so the fill is exactly that pair, which is what
+   makes the sprite look like it belongs to the bar instead of pasted onto it.
+   ========================================================================== */
+/* The GIF head stays magnified (68 px = 2x the original 34) while the rail goes
+   back to the original 12 px -- so the bar is a slim rail with a big sprite
+   riding it.  The sprite is centred on the rail (top:50% + translateY(-50%))
+   and the rail is centred in the bar (align-items:center), which is what keeps
+   the head exactly on the bar's vertical centre line rather than hanging off
+   it.  The self-test asserts that centring numerically. */
+.uv-scope .uv-prog {
+  --p: 0;                       /* 0..100, set from the page */
+  --c1: #f7e78d;                /* gold  (chongci.gif frames 0/3) */
+  --c2: #7dd7e4;                /* cyan  (chongci.gif frames 1/2) */
+  --head: 68px;                 /* the chongci.gif sprite */
+  --rail: 12px;                 /* the track thickness (unchanged from v1) */
+  position: relative;
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  min-height: calc(var(--head) + 12px);
+  padding: 6px 22px;
+  border: 1px solid var(--panel-line);
+  border-radius: 999px;
+  background: var(--panel);
+  box-shadow: var(--shadow);
+  backdrop-filter: blur(14px) saturate(1.1);
+  transition: background var(--fade) var(--ease), border-color var(--fade) var(--ease);
+}
+
+/* the caption on the left */
+.uv-scope .uv-prog-cap {
+  flex: none;
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  min-width: 152px;
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--ink-soft);
+  white-space: nowrap;
+}
+.uv-scope .uv-prog-cap b { color: var(--ink); font-variant-numeric: tabular-nums; font-size: 15px; }
+
+/* the rail */
+.uv-scope .uv-prog-track {
+  position: relative;
+  flex: 1 1 auto;
+  height: var(--rail);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--ink) 15%, transparent);
+  box-shadow: inset 0 1px 3px rgba(0, 0, 0, .35);
+}
+
+/* the fill: gold -> cyan -> gold, scrolling while a build runs */
+.uv-scope .uv-prog-fill {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: calc(var(--p) * 1%);
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--c1), var(--c2) 55%, var(--c1));
+  background-size: 220% 100%;
+  box-shadow: 0 0 14px -2px color-mix(in srgb, var(--c2) 70%, transparent);
+  transition: width .5s var(--ease), box-shadow .4s var(--ease);
+}
+.uv-scope .uv-prog.running .uv-prog-fill {
+  animation: uv-prog-flow 1.5s linear infinite;
+}
+@keyframes uv-prog-flow { to { background-position: -220% 0; } }
+
+/* a travelling sheen on top of the fill */
+.uv-scope .uv-prog-fill::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: linear-gradient(100deg, transparent 35%,
+              rgba(255, 255, 255, .55) 50%, transparent 65%);
+  background-size: 220% 100%;
+  opacity: 0;
+  transition: opacity .3s var(--ease);
+}
+.uv-scope .uv-prog.running .uv-prog-fill::after {
+  opacity: 1;
+  animation: uv-prog-sheen 1.9s linear infinite;
+}
+@keyframes uv-prog-sheen { to { background-position: 220% 0; } }
+
+/* the GIF head -- 2x the original size, riding the leading edge */
+.uv-scope .uv-prog-head {
+  position: absolute;
+  top: 50%;
+  left: calc(var(--p) * 1%);
+  width: var(--head);
+  height: var(--head);
+  margin-left: calc(var(--head) / -2);
+  border-radius: 50%;
+  object-fit: contain;
+  filter: drop-shadow(0 0 10px color-mix(in srgb, var(--c2) 75%, transparent));
+  transform: translateY(-50%) scale(.82);
+  opacity: 0;
+  transition: left .5s var(--ease), opacity .3s var(--ease), transform .3s var(--ease);
+  pointer-events: none;
+}
+.uv-scope .uv-prog.running .uv-prog-head,
+.uv-scope .uv-prog.done .uv-prog-head { opacity: 1; transform: translateY(-50%) scale(1); }
+.uv-scope .uv-prog.running .uv-prog-head { animation: uv-prog-bob 1.1s ease-in-out infinite; }
+@keyframes uv-prog-bob {
+  0%, 100% { transform: translateY(-50%) scale(1); }
+  50%      { transform: translateY(-58%) scale(1.07); }
+}
+
+/* the trailing state pill */
+.uv-scope .uv-prog-state {
+  flex: none;
+  min-width: 104px;
+  text-align: right;
+  font-size: 13.5px;
+  font-weight: 700;
+  color: var(--ink-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+/* finished states */
+.uv-scope .uv-prog.done {
+  border-color: color-mix(in srgb, var(--c2) 55%, transparent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--c2) 14%, transparent), var(--shadow);
+}
+.uv-scope .uv-prog.done .uv-prog-state { color: var(--ok); }
+.uv-scope .uv-prog.failed { border-color: color-mix(in srgb, var(--bad) 55%, transparent); }
+.uv-scope .uv-prog.failed .uv-prog-fill {
+  background: linear-gradient(90deg, var(--bad), color-mix(in srgb, var(--bad) 55%, var(--c2)));
+  box-shadow: 0 0 14px -2px color-mix(in srgb, var(--bad) 70%, transparent);
+}
+.uv-scope .uv-prog.failed .uv-prog-state { color: var(--bad); }

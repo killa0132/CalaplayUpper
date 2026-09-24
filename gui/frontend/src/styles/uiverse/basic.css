@@ -1,0 +1,331 @@
+/* ==========================================================================
+   Uiverse-style components, hand written in the Uiverse idiom
+   (https://uiverse.io) and scoped behind `.uv-scope` so they can never leak
+   into anything else.  Everything reads the theme variables, so both themes
+   are covered by the same CSS.
+   ========================================================================== */
+
+.uv-scope { color: var(--ink); }
+
+/* ---------------------------------------------------------------- buttons */
+.uv-btn {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 11px 20px;
+  border: 1px solid var(--panel-line);
+  border-radius: var(--radius-sm);
+  background: var(--panel);
+  color: var(--ink);
+  font: inherit;
+  font-weight: 600;
+  letter-spacing: .2px;
+  cursor: pointer;
+  overflow: hidden;
+  backdrop-filter: blur(10px);
+  transition: transform .18s var(--ease), box-shadow .28s var(--ease),
+              background .28s var(--ease), border-color .28s var(--ease),
+              color var(--fade) var(--ease);
+}
+.uv-btn:hover:not(:disabled) { transform: translateY(-1.5px); box-shadow: var(--shadow); }
+.uv-btn:active:not(:disabled) { transform: translateY(0) scale(.985); }
+.uv-btn:disabled { opacity: .45; cursor: not-allowed; }
+
+/* the shine sweep */
+.uv-btn::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: -120%;
+  width: 60%;
+  height: 100%;
+  background: linear-gradient(100deg, transparent, rgba(255, 255, 255, .30), transparent);
+  transition: left .6s var(--ease);
+}
+.uv-btn:hover:not(:disabled)::after { left: 130%; }
+
+.uv-btn-primary {
+  border-color: transparent;
+  background: linear-gradient(135deg, var(--accent), color-mix(in srgb, var(--accent) 62%, #9f6bff));
+  color: var(--accent-ink);
+  box-shadow: 0 8px 24px -8px color-mix(in srgb, var(--accent) 70%, transparent);
+}
+.uv-btn-primary:hover:not(:disabled) {
+  box-shadow: 0 14px 32px -10px color-mix(in srgb, var(--accent) 85%, transparent);
+}
+
+.uv-btn-ghost { background: transparent; }
+.uv-btn-ghost:hover:not(:disabled) { background: var(--panel); }
+
+.uv-btn-danger { color: var(--bad); border-color: color-mix(in srgb, var(--bad) 45%, transparent); }
+.uv-btn-danger:hover:not(:disabled) { background: color-mix(in srgb, var(--bad) 14%, transparent); }
+
+.uv-btn-lg { padding: 15px 28px; font-size: 15.5px; border-radius: 12px; }
+.uv-btn-sm { padding: 7px 13px; font-size: 12.5px; border-radius: 9px; }
+
+/* ----------------------------------------------------------------- cards */
+.uv-card {
+  position: relative;
+  border: 1px solid var(--panel-line);
+  border-radius: var(--radius);
+  background: var(--panel);
+  box-shadow: var(--shadow);
+  backdrop-filter: blur(14px) saturate(1.15);
+  transition: background var(--fade) var(--ease), border-color var(--fade) var(--ease),
+              box-shadow .3s var(--ease);
+}
+.uv-card-pad { padding: 16px 18px; }
+.uv-card-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 12px;
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  color: var(--ink-dim);
+}
+
+/* ---------------------------------------------------------------- fields */
+.uv-field {
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid var(--panel-line);
+  border-radius: var(--radius-sm);
+  background: var(--field);
+  color: var(--ink);
+  font: inherit;
+  outline: none;
+  transition: border-color .22s var(--ease), box-shadow .22s var(--ease),
+              background var(--fade) var(--ease), color var(--fade) var(--ease);
+}
+.uv-field:focus {
+  border-color: color-mix(in srgb, var(--accent) 60%, transparent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+}
+.uv-field::placeholder { color: var(--ink-dim); }
+
+select.uv-field { appearance: none; cursor: pointer; }
+
+/* ------------------------------------------------------------- checkboxes */
+.uv-check { display: inline-flex; align-items: center; gap: 9px; cursor: pointer; user-select: none; }
+.uv-check input { position: absolute; opacity: 0; pointer-events: none; }
+.uv-check .box {
+  position: relative;
+  width: 19px;
+  height: 19px;
+  flex: none;
+  border: 1.5px solid var(--panel-line);
+  border-radius: 6px;
+  background: var(--field);
+  transition: all .2s var(--ease);
+}
+.uv-check .box::after {
+  content: '';
+  position: absolute;
+  left: 5px;
+  top: 1.5px;
+  width: 5px;
+  height: 10px;
+  border: solid var(--accent-ink);
+  border-width: 0 2px 2px 0;
+  transform: rotate(45deg) scale(0);
+  transition: transform .2s var(--ease);
+}
+.uv-check input:checked + .box {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+.uv-check input:checked + .box::after { transform: rotate(45deg) scale(1); }
+.uv-check:hover .box { border-color: color-mix(in srgb, var(--accent) 55%, transparent); }
+
+/* ----------------------------------------------------------------- pills */
+.uv-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border: 1px solid var(--panel-line);
+  border-radius: 999px;
+  background: var(--panel);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ink-soft);
+  transition: all .25s var(--ease);
+}
+.uv-pill.on   { color: var(--ok);   border-color: color-mix(in srgb, var(--ok) 45%, transparent); }
+.uv-pill.fail { color: var(--bad);  border-color: color-mix(in srgb, var(--bad) 45%, transparent); }
+.uv-pill.now  { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+                box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 16%, transparent); }
+
+/* ------------------------------------------- interactive "glow" cards -----
+   A gradient ring (gold -> cyan, the chime.gif palette) that lights up on
+   hover, plus a small lift.  The ring is drawn with a masked pseudo-element so
+   it follows the border radius; border-color changes too, as a fallback for any
+   engine that ignores the mask. */
+.uv-card-glow {
+  transition: transform .28s var(--ease), box-shadow .32s var(--ease),
+              background var(--fade) var(--ease), border-color .32s var(--ease);
+}
+.uv-card-glow::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  padding: 1.5px;
+  background: conic-gradient(from 140deg, var(--c1), var(--c2) 45%, var(--c1));
+  -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+  mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  opacity: 0;
+  transition: opacity .35s var(--ease), filter .35s var(--ease);
+  pointer-events: none;
+}
+.uv-card-glow:hover::before { opacity: .95; filter: saturate(1.15); }
+.uv-card-glow:hover {
+  transform: translateY(-2px);
+  border-color: color-mix(in srgb, var(--c2) 45%, transparent);
+  box-shadow: 0 20px 44px -20px color-mix(in srgb, var(--c2) 65%, rgba(0, 0, 0, .55)),
+              var(--shadow);
+}
+/* a small gradient tick in front of every card title */
+.uv-card-glow .uv-card-title::before {
+  content: '';
+  width: 3px;
+  height: 14px;
+  border-radius: 2px;
+  background: linear-gradient(180deg, var(--c1), var(--c2));
+  box-shadow: 0 0 8px color-mix(in srgb, var(--c2) 60%, transparent);
+}
+
+/* ---------------------------------------------- orbiting-beam card (OPTIONS)
+   The second interactive card gets its own motion so the two left-hand cards
+   do not behave identically: a gold/cyan comet that keeps circling the border
+   while you are looking at the form, plus the same small lift on hover.
+   `@property` lets a keyframe animate the gradient's angle; on an engine
+   without it the ring simply stays still instead of breaking. */
+@property --uv-a {
+  syntax: '<angle>';
+  inherits: false;
+  initial-value: 0deg;
+}
+.uv-card-orbit { transition: transform .28s var(--ease), box-shadow .32s var(--ease); }
+.uv-card-orbit::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  padding: 1.6px;
+  background: conic-gradient(from var(--uv-a),
+              transparent 0deg 232deg,
+              color-mix(in srgb, var(--c2) 85%, transparent) 292deg,
+              var(--c1) 340deg,
+              transparent 360deg);
+  -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+  mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  opacity: .9;
+  pointer-events: none;
+  animation: uv-orbit 6.5s linear infinite;
+}
+@keyframes uv-orbit { to { --uv-a: 360deg; } }
+.uv-card-orbit:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 20px 44px -20px color-mix(in srgb, var(--c1) 60%, rgba(0, 0, 0, .55)),
+              var(--shadow);
+}
+/* the comet speeds up while the app is busy (set from the page) */
+.uv-card-orbit.busy::before { animation-duration: 1.9s; opacity: 1; }
+.uv-card-orbit .uv-card-title::before {
+  content: '';
+  width: 3px;
+  height: 14px;
+  border-radius: 2px;
+  background: linear-gradient(180deg, var(--c2), var(--c1));
+  box-shadow: 0 0 8px color-mix(in srgb, var(--c1) 60%, transparent);
+}
+
+/* --------------------------------------------------- solid chip (theme) ---
+   The background image is busy, so the label + switch get their own opaque
+   surface with a shadow instead of sitting straight on the photo. */
+.uv-scope .uv-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  padding: 5px 12px;
+  border: 1px solid var(--panel-line);
+  border-radius: 999px;
+  background: var(--panel-solid);
+  box-shadow: 0 8px 22px -10px rgba(0, 0, 0, .55), var(--shadow);
+  transition: background var(--fade) var(--ease), border-color var(--fade) var(--ease);
+}
+.uv-scope .uv-chip .cap {
+  font-size: 12.5px;
+  font-weight: 700;
+  letter-spacing: .2px;
+  color: var(--ink);
+  white-space: nowrap;
+}
+
+/* ------------------------------------------------------------- log view */
+.uv-log {
+  background: var(--log-bg);
+  color: var(--log-ink);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--panel-line);
+  padding: 10px 12px;
+  overflow-x: hidden;
+  overflow-y: auto;                 /* its own, always-present scrollbar */
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  font-family: Consolas, "Cascadia Mono", monospace;
+  font-size: 12.3px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+.uv-log .l-quality { color: var(--ok); }
+.uv-log .l-gate    { color: var(--accent); font-weight: 600; }
+.uv-log .l-audio   { color: var(--warn); }
+.uv-log .l-err     { color: var(--bad); font-weight: 600; }
+.uv-log .l-cmd     { color: var(--ink-dim); }
+
+/* themed scrollbars (log panel + the scrolling left column) */
+.uv-log::-webkit-scrollbar,
+.uv-scroll::-webkit-scrollbar { width: 11px; height: 11px; }
+.uv-log::-webkit-scrollbar-track,
+.uv-scroll::-webkit-scrollbar-track { background: color-mix(in srgb, var(--ink) 8%, transparent);
+                                      border-radius: 999px; }
+.uv-log::-webkit-scrollbar-thumb,
+.uv-scroll::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: linear-gradient(180deg, var(--c1), var(--c2));
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+.uv-log::-webkit-scrollbar-thumb:hover,
+.uv-scroll::-webkit-scrollbar-thumb:hover { filter: saturate(1.2) brightness(1.05); }
+.uv-log::-webkit-scrollbar-corner { background: transparent; }
+
+
+/* ------------------------------------------------------------- spinner */
+.uv-spin {
+  width: 15px; height: 15px;
+  border: 2px solid color-mix(in srgb, var(--ink) 25%, transparent);
+  border-top-color: var(--ink);
+  border-radius: 50%;
+  animation: uv-rot .8s linear infinite;
+}
+@keyframes uv-rot { to { transform: rotate(360deg); } }
+
+/* --------------------------------------------------------------- tables */
+.uv-table { width: 100%; border-collapse: collapse; font-size: 12.8px; }
+.uv-table th, .uv-table td { text-align: left; padding: 6px 8px; border-bottom: 1px dashed var(--panel-line); }
+.uv-table th { color: var(--ink-dim); font-weight: 600; }
+.uv-table td.ok { color: var(--ok); font-weight: 600; }
+.uv-table td.bad { color: var(--bad); font-weight: 600; }

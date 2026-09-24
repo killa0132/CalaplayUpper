@@ -1,0 +1,54 @@
+/* ==========================================================================
+   BorderGlow (ReactBits' BorderGlow, ported to plain CSS/Vue).
+   ReactBits ships it as a React component built on framer-motion; this project
+   has no React, so the same visual is reproduced with one pseudo-element: a
+   radial gradient that follows the pointer and is masked down to the border
+   ring only, i.e. the glow "hugs" the border instead of filling the card.
+   Colours come from the chongci.gif palette (--c1 gold / --c2 cyan) so it sits
+   next to the progress bar without clashing.
+   ========================================================================== */
+.uv-border-glow { position: relative; }
+
+.uv-border-glow::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  padding: 1.6px;                     /* the thickness of the ring */
+  background: radial-gradient(260px circle at var(--gx, 50%) var(--gy, 0%),
+              var(--c1) 0%,
+              var(--c2) 38%,
+              color-mix(in srgb, var(--c2) 35%, transparent) 62%,
+              transparent 78%);
+  -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+  mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  opacity: 0;
+  transition: opacity .42s var(--ease);
+  pointer-events: none;
+  z-index: 2;
+}
+
+/* the panel keeps a faint glow once it has something to say, so it never looks
+   dead before the pointer arrives */
+.uv-border-glow.on::before { opacity: .78; }
+
+.uv-border-glow:hover {
+  border-color: color-mix(in srgb, var(--c2) 45%, transparent);
+  box-shadow: 0 0 26px -6px color-mix(in srgb, var(--c2) 62%, rgba(0, 0, 0, .5)),
+              var(--shadow);
+}
+/* hover must win over .on -- keep this rule last */
+.uv-border-glow:hover::before { opacity: 1; }
+
+/* an all-pass result earns a slow gold/cyan breathing halo */
+.uv-border-glow.pass:hover,
+.uv-border-glow.pass {
+  box-shadow: 0 0 30px -8px color-mix(in srgb, var(--c2) 55%, rgba(0, 0, 0, .5)),
+              var(--shadow);
+}
+.uv-border-glow.pass::before {
+  background: radial-gradient(260px circle at var(--gx, 50%) var(--gy, 0%),
+              var(--c1) 0%, var(--c2) 34%, var(--c1) 74%, transparent 86%);
+}

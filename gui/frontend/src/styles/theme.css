@@ -1,0 +1,105 @@
+/* ==========================================================================
+   Theme: two full-window background layers that cross-fade, so switching
+   between bg_light.jpg and bg_dark.jpg is smooth instead of a hard cut.
+   Light theme deliberately has NO dark scrim (the user asked for that) and
+   uses a high-contrast ink colour instead.
+   ========================================================================== */
+:root {
+  --fade: 620ms;
+  --ease: cubic-bezier(.4, 0, .2, 1);
+  --radius: 14px;
+  --radius-sm: 10px;
+  --gap: 14px;
+  /* the chongci.gif palette: the progress bar, card rings and scrollbars all
+     reuse these two so the whole page feels like one widget */
+  --c1: #f7e78d;
+  --c2: #7dd7e4;
+}
+
+/* ---- light ------------------------------------------------------------- */
+html[data-theme='light'] {
+  --ink: #0e1116;
+  --ink-soft: #3c4a5c;
+  --ink-dim: #5a636f;
+  --panel: rgba(255, 255, 255, .74);
+  --panel-solid: #ffffff;
+  --panel-line: rgba(16, 20, 28, .12);
+  --field: rgba(255, 255, 255, .82);
+  --shadow: 0 10px 34px rgba(20, 26, 38, .16);
+  --accent: #2f6df6;
+  --accent-ink: #ffffff;
+  --ok: #178a55;
+  --bad: #c8382f;
+  --warn: #9a6a00;
+  --scrim: transparent;
+  --log-bg: rgba(255, 255, 255, .86);
+  --log-ink: #1d2430;
+}
+
+/* ---- dark -------------------------------------------------------------- */
+html[data-theme='dark'] {
+  --ink: #eef2f8;
+  --ink-soft: #c3cbd9;
+  --ink-dim: #8f9aab;
+  --panel: rgba(14, 18, 27, .68);
+  --panel-solid: #12161f;
+  --panel-line: rgba(255, 255, 255, .11);
+  --field: rgba(10, 13, 20, .62);
+  --shadow: 0 14px 40px rgba(0, 0, 0, .45);
+  --accent: #6ea8fe;
+  --accent-ink: #06101f;
+  --ok: #3ecf8e;
+  --bad: #ff6b6b;
+  --warn: #ffcc66;
+  --scrim: rgba(5, 7, 12, .60);
+  --log-bg: rgba(8, 11, 17, .78);
+  --log-ink: #d7dee9;
+}
+
+* { box-sizing: border-box; }
+
+html, body, #app { height: 100%; }
+
+body {
+  margin: 0;
+  font: 14px/1.55 "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+  color: var(--ink);
+  background-color: #0c0f15;
+  transition: color var(--fade) var(--ease);
+  overflow: hidden;                     /* the log view scrolls, not the window */
+}
+
+/* the two background images, stacked and cross-faded */
+body::before,
+body::after {
+  content: '';
+  position: fixed;
+  inset: 0;
+  background-repeat: no-repeat;
+  background-position: center center;
+  background-size: cover;
+  background-attachment: fixed;
+  transition: opacity var(--fade) var(--ease);
+  pointer-events: none;
+  z-index: -2;
+}
+
+body::before { background-image: url('/bg_light.jpg'); opacity: 0; }
+body::after  { background-image: url('/bg_dark.jpg');  opacity: 1; }
+
+html[data-theme='light'] body::before { opacity: 1; }
+html[data-theme='light'] body::after  { opacity: 0; }
+
+/* the scrim sits between the images and the content; it is transparent in the
+   light theme (no black mask), which is why the ink colour must carry the
+   contrast there. */
+body .scrim {
+  position: fixed;
+  inset: 0;
+  background: var(--scrim);
+  transition: background var(--fade) var(--ease);
+  pointer-events: none;
+  z-index: -1;
+}
+
+code, .mono { font-family: Consolas, "Cascadia Mono", monospace; }

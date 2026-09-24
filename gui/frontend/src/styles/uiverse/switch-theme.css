@@ -1,0 +1,62 @@
+/* ==========================================================================
+   Theme switch -- the "little widget" that swaps bg_light.jpg <-> bg_dark.jpg.
+   A pill with a sliding knob, a sun/moon that cross-fades, and a soft glow
+   that follows the accent.  Everything eases, so the switch feels fluid.
+   ========================================================================== */
+.uv-scope .uv-theme {
+  position: relative;
+  width: 66px;
+  height: 34px;
+  flex: none;
+  border: 1px solid var(--panel-line);
+  border-radius: 999px;
+  /* a solid track: it sits inside .uv-chip, so it never fights the photo */
+  background: linear-gradient(180deg,
+              color-mix(in srgb, var(--ink) 10%, var(--panel-solid)),
+              color-mix(in srgb, var(--ink) 22%, var(--panel-solid)));
+  box-shadow: inset 0 1px 3px rgba(0, 0, 0, .35);
+  cursor: pointer;
+  padding: 0;
+  transition: background var(--fade) var(--ease), border-color .3s var(--ease),
+              box-shadow .3s var(--ease);
+}
+.uv-scope .uv-theme:hover {
+  box-shadow: inset 0 1px 3px rgba(0, 0, 0, .35),
+              0 0 0 4px color-mix(in srgb, var(--c2) 26%, transparent);
+}
+
+.uv-scope .uv-theme .knob {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  background: linear-gradient(140deg, #ffe9a8, #ffb454);
+  box-shadow: 0 3px 10px rgba(0, 0, 0, .30);
+  transition: transform .55s cubic-bezier(.34, 1.56, .64, 1), background var(--fade) var(--ease);
+}
+html[data-theme='dark'] .uv-scope .uv-theme .knob {
+  transform: translateX(32px);
+  background: linear-gradient(140deg, #cdd8ff, #7f93d6);
+}
+
+.uv-scope .uv-theme .glyph {
+  position: absolute;
+  top: 0;
+  width: 34px;
+  height: 34px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 13px;
+  line-height: 1;
+  transition: opacity var(--fade) var(--ease), transform .55s var(--ease);
+  pointer-events: none;
+}
+.uv-scope .uv-theme .glyph.sun  { left: 32px; }
+.uv-scope .uv-theme .glyph.moon { left: 0; }
+html[data-theme='light'] .uv-scope .uv-theme .glyph.sun  { opacity: 1; transform: scale(1); }
+html[data-theme='light'] .uv-scope .uv-theme .glyph.moon { opacity: 0; transform: scale(.6); }
+html[data-theme='dark']  .uv-scope .uv-theme .glyph.sun  { opacity: 0; transform: scale(.6); }
+html[data-theme='dark']  .uv-scope .uv-theme .glyph.moon { opacity: 1; transform: scale(1); }

@@ -1,0 +1,335 @@
+/* ==========================================================================
+   Success / failure modal, in the Uiverse idiom: a blurred backdrop, a card
+   that scales+fades in (and out), an accent glow that matches the outcome.
+   ========================================================================== */
+.uv-scope .uv-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: color-mix(in srgb, #05070c 62%, transparent);
+  backdrop-filter: blur(7px) saturate(.9);
+  animation: uv-backdrop-in .28s var(--ease) both;
+}
+.uv-scope .uv-modal-backdrop.leaving { animation: uv-backdrop-out .22s var(--ease) both; }
+@keyframes uv-backdrop-in  { from { opacity: 0; } to { opacity: 1; } }
+@keyframes uv-backdrop-out { from { opacity: 1; } to { opacity: 0; } }
+
+.uv-scope .uv-modal {
+  position: relative;
+  width: min(520px, 92vw);
+  max-height: 88vh;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+  padding: 26px 26px 22px;
+  border: 1px solid var(--panel-line);
+  border-radius: 20px;
+  background: var(--panel-solid);
+  box-shadow: 0 26px 70px -18px rgba(0, 0, 0, .65), var(--shadow);
+  animation: uv-modal-in .42s cubic-bezier(.22, 1.24, .36, 1) both;
+}
+.uv-scope .uv-modal-backdrop.leaving .uv-modal {
+  animation: uv-modal-out .22s var(--ease) both;
+}
+@keyframes uv-modal-in {
+  from { opacity: 0; transform: translateY(18px) scale(.92); }
+  to   { opacity: 1; transform: translateY(0) scale(1); }
+}
+@keyframes uv-modal-out {
+  from { opacity: 1; transform: translateY(0) scale(1); }
+  to   { opacity: 0; transform: translateY(10px) scale(.96); }
+}
+
+/* the coloured halo behind the artwork */
+.uv-scope .uv-modal::before {
+  content: '';
+  position: absolute;
+  top: -60px;
+  left: 50%;
+  width: 320px;
+  height: 220px;
+  transform: translateX(-50%);
+  border-radius: 50%;
+  background: radial-gradient(closest-side,
+              color-mix(in srgb, var(--halo) 55%, transparent), transparent 72%);
+  filter: blur(6px);
+  pointer-events: none;
+}
+.uv-scope .uv-modal-backdrop[data-kind='ok']   .uv-modal { --halo: #7dd7e4; }
+.uv-scope .uv-modal-backdrop[data-kind='fail'] .uv-modal { --halo: var(--bad); }
+
+.uv-scope .uv-modal-art {
+  position: relative;
+  width: 168px;
+  height: 168px;
+  object-fit: contain;
+  filter: drop-shadow(0 12px 24px rgba(0, 0, 0, .45));
+  animation: uv-art-float 3.4s ease-in-out infinite;
+}
+.uv-scope .uv-modal-backdrop[data-kind='fail'] .uv-modal-art { width: 158px; height: 158px; }
+@keyframes uv-art-float {
+  0%, 100% { transform: translateY(0); }
+  50%      { transform: translateY(-7px); }
+}
+
+.uv-scope .uv-modal-text {
+  position: relative;
+  margin: 0;
+  font-size: 21px;
+  font-weight: 800;
+  letter-spacing: .4px;
+  text-align: center;
+  color: var(--ink);
+}
+.uv-scope .uv-modal-backdrop[data-kind='ok']   .uv-modal-text {
+  background: linear-gradient(100deg, #d8b552, #7dd7e4 60%, #d8b552);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+.uv-scope .uv-modal-backdrop[data-kind='fail'] .uv-modal-text { color: var(--bad); }
+
+.uv-scope .uv-modal-sub {
+  position: relative;
+  margin: 0;
+  font-size: 12.6px;
+  line-height: 1.6;
+  text-align: center;
+  color: var(--ink-dim);
+  max-width: 44ch;
+  word-break: break-word;
+}
+
+.uv-scope .uv-modal-err {
+  position: relative;
+  width: 100%;
+  max-height: 132px;
+  overflow: auto;
+  padding: 9px 11px;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--bad) 11%, transparent);
+  color: var(--bad);
+  font-family: Consolas, "Cascadia Mono", monospace;
+  font-size: 11.8px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.uv-scope .uv-modal-acts {
+  position: relative;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  margin-top: 2px;
+}
+
+/* the export button carries a tiny download glyph */
+.uv-scope .uv-modal-acts .uv-btn .glyph { font-size: 13px; opacity: .85; }
+.uv-scope .uv-modal-note {
+  position: relative;
+  font-size: 12px;
+  color: var(--ink-dim);
+  text-align: center;
+  min-height: 17px;
+}
+.uv-scope .uv-modal-note.bad { color: var(--bad); }
+.uv-scope .uv-modal-note.ok  { color: var(--ok); }
+
+/* ==========================================================================
+   "Join us" variant of the same dialog: same backdrop/scale-in machinery, a
+   bigger illustration, a gold->cyan halo and the two community buttons.
+   ========================================================================== */
+.uv-scope .uv-modal-backdrop[data-kind='join'] {
+  background: color-mix(in srgb, #05070c 66%, transparent);
+}
+.uv-scope .uv-modal.join {
+  width: min(560px, 94vw);
+  gap: 11px;
+  padding: 22px 24px 18px;
+  /* the flying stars are absolutely positioned children and therefore grow the
+     dialog's scrollable overflow -- a horizontal scrollbar popped out on hover.
+     Vertical scrolling stays (a small window must still reach the buttons). */
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+.uv-scope .uv-modal-backdrop[data-kind='join'] .uv-modal::before {
+  background: radial-gradient(closest-side,
+              color-mix(in srgb, var(--c1) 48%, transparent), transparent 72%);
+}
+.uv-scope .uv-modal-backdrop[data-kind='join'] .uv-modal-text {
+  background: linear-gradient(100deg, var(--c1), var(--c2) 60%, var(--c1));
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+html[data-theme='light'] .uv-scope .uv-modal-backdrop[data-kind='join'] .uv-modal-text {
+  background: linear-gradient(100deg, #a5811c, #1c8fa4 60%, #a5811c);
+  -webkit-background-clip: text;
+  background-clip: text;
+}
+.uv-scope .join-art {
+  width: min(330px, 64vw);
+  height: auto;
+  max-height: 42vh;
+  object-fit: contain;
+  animation-duration: 4.4s;
+}
+.uv-scope .join-body { max-width: 48ch; font-size: 13px; line-height: 1.85; }
+.uv-scope .join-body b { color: var(--ink); }
+/* Discord / Bilibili / GitHub / QQ: one 2x2 grid, all four the same size -- QQ
+   used to be pushed onto a row of its own by the flexible wrap layout. */
+.uv-scope .uv-modal-acts.join-acts {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  width: 100%;
+  max-width: 420px;
+  margin-top: 4px;
+}
+.uv-scope .join-acts .join-btn { justify-content: center; width: 100%; }
+.uv-scope .join-btn { text-decoration: none; padding: 10px 14px; }
+/* the leading action stays in the chongci palette instead of the blue accent,
+   so the dialog reads as part of the same widget family as the progress bar */
+.uv-scope .join-btn-lead {
+  border-color: transparent;
+  background: linear-gradient(135deg, var(--c1), var(--c2));
+  color: #101418;
+  box-shadow: 0 8px 24px -8px color-mix(in srgb, var(--c2) 70%, transparent);
+}
+.uv-scope .join-btn-lead:hover:not(:disabled) {
+  box-shadow: 0 14px 32px -10px color-mix(in srgb, var(--c2) 85%, transparent);
+}
+.uv-scope .join-btn .ic { width: 18px; height: 18px; flex: none; }
+.uv-scope .join-note { word-break: break-all; font-size: 11.5px; min-height: 16px; }
+
+.uv-scope .uv-join-x {
+  position: absolute;
+  top: 8px;
+  right: 10px;
+  width: 30px;
+  height: 30px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid transparent;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--ink-dim);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background .2s var(--ease), color .2s var(--ease), transform .2s var(--ease);
+}
+.uv-scope .uv-join-x:hover {
+  background: color-mix(in srgb, var(--ink) 12%, transparent);
+  color: var(--ink);
+  transform: rotate(90deg);
+}
+
+/* ---- "leave a star" + "QQ group" variants --------------------------------
+   Same backdrop/scale-in machinery, always a vertical stack: art on top,
+   copy below (that is the layout the user asked for). */
+.uv-scope .uv-modal-backdrop[data-kind='star'],
+.uv-scope .uv-modal-backdrop[data-kind='qq'] {
+  background: color-mix(in srgb, #05070c 68%, transparent);
+  z-index: 46;                       /* above the hub dialog (40) */
+}
+.uv-scope .uv-modal-backdrop[data-kind='star'] .uv-modal,
+.uv-scope .uv-modal-backdrop[data-kind='qq'] .uv-modal { width: min(480px, 92vw); }
+.uv-scope .uv-modal-backdrop[data-kind='star'] .uv-modal-text,
+.uv-scope .uv-modal-backdrop[data-kind='qq'] .uv-modal-text {
+  background: linear-gradient(100deg, var(--c1), var(--c2) 60%, var(--c1));
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+html[data-theme='light'] .uv-scope .uv-modal-backdrop[data-kind='star'] .uv-modal-text,
+html[data-theme='light'] .uv-scope .uv-modal-backdrop[data-kind='qq'] .uv-modal-text {
+  background: linear-gradient(100deg, #a5811c, #1c8fa4 60%, #a5811c);
+  -webkit-background-clip: text;
+  background-clip: text;
+}
+.uv-scope .star-art {
+  width: min(300px, 58vw);
+  height: auto;                  /* the base .uv-modal-art is 168px tall */
+  max-height: 40vh;
+  object-fit: contain;
+  animation-duration: 4.8s;
+}
+.uv-scope .qq-art {
+  width: min(232px, 44vw);
+  height: auto;
+  max-height: 36vh;
+  object-fit: contain;
+  border-radius: 16px;
+  box-shadow: 0 14px 34px -14px rgba(0, 0, 0, .6);
+}
+.uv-scope .uv-qq-no {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 16px;
+  border: 1px dashed color-mix(in srgb, var(--c2) 55%, transparent);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--c2) 8%, transparent);
+}
+.uv-scope .uv-qq-no span { font-size: 12px; color: var(--ink-dim); }
+.uv-scope .uv-qq-no b {
+  font-size: 20px;
+  font-weight: 800;
+  letter-spacing: .07em;
+  font-variant-numeric: tabular-nums;
+  color: var(--ink);
+}
+
+/* ---- the GitHub entry: a field of stars flying out of the icon ---------- */
+.uv-scope .join-btn-gh { position: relative; overflow: visible; }
+.uv-scope .gh-ic { color: var(--c1); }
+.uv-scope .gh-ic path { fill: currentColor; }
+.uv-scope .gh-fly {
+  position: absolute;
+  left: 21px;
+  top: 50%;
+  width: 0;
+  height: 0;
+  pointer-events: none;
+}
+.uv-scope .gh-fly i {
+  position: absolute;
+  left: 0;
+  top: 0;
+  display: block;
+  width: 11px;
+  height: 11px;
+  margin: -5.5px 0 0 -5.5px;
+  color: var(--c1);
+  opacity: 0;
+  will-change: transform, opacity;
+  animation: gh-fly var(--d, 1.8s) linear var(--delay, 0s) infinite;
+}
+.uv-scope .join-btn-gh:hover .gh-fly i { color: var(--c2); }
+.uv-scope .gh-fly i svg { width: 100%; height: 100%; display: block; }
+@keyframes gh-fly {
+  0%   { transform: translate(0, 0) scale(.25) rotate(0deg); opacity: 0; }
+  14%  { opacity: 1; }
+  68%  { opacity: .85; }
+  100% { transform: translate(var(--dx, 20px), var(--dy, -20px))
+                    scale(var(--s, .8)) rotate(240deg); opacity: 0; }
+}
+.uv-scope .join-btn-gh:hover {
+  border-color: color-mix(in srgb, var(--c1) 60%, transparent);
+  box-shadow: 0 10px 26px -14px color-mix(in srgb, var(--c1) 85%, transparent);
+}
+.uv-scope .join-btn-qq:hover {
+  border-color: color-mix(in srgb, var(--c2) 60%, transparent);
+  box-shadow: 0 10px 26px -14px color-mix(in srgb, var(--c2) 85%, transparent);
+}

@@ -1,0 +1,15 @@
+{
+  // Recommended extensions for CalaplayUpper.
+  // VSCode will offer to install these when the folder is opened.
+  "recommendations": [
+    "Vue.volar",                    // Vue 3 SFC support (template/script highlight, IntelliSense)
+    "ms-python.python",             // Python (gui/, core/, cli/, tests/)
+    "ms-python.vscode-pylance",     // fast type checking / go-to-definition
+    "ms-vscode.powershell",         // build_*.ps1, tests/run_regression.ps1
+    "ms-dotnettools.csdevkit",      // tools-src/ (da-patch / tex-inspect, C#)
+    "EditorConfig.EditorConfig"     // keeps the mixed .ps1/.py/.vue tree consistent
+  ],
+  "unwantedRecommendations": [
+    "Vetur"                         // Vetur does not support Vue 3 <script setup>; Volar replaces it
+  ]
+}

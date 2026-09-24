@@ -1,0 +1,61 @@
+{
+  // ---- Python: always use the project's own venv -------------------------
+  "python.defaultInterpreterPath": "${workspaceFolder}\\python\\Scripts\\python.exe",
+  "python.analysis.extraPaths": ["${workspaceFolder}"],
+  "python.analysis.diagnosticMode": "workspace",
+  "python.testing.pytestEnabled": false,
+  "python.testing.unittestEnabled": false,
+
+  // ---- Files: this box's console is GBK, so be explicit -------------------
+  "files.encoding": "utf8",
+  "files.eol": "\n",
+  "files.trimTrailingWhitespace": false,
+
+  // ---- Keep the explorer / search focused on hand-written code ------------
+  // (the venv, PyInstaller scratch dirs, caches and generated test material are
+  //  several GB and never what you are looking for)
+  "files.exclude": {
+    "**/__pycache__": true,
+    "**/*.pyc": true,
+    "python/": true,
+    "build_out/": true,
+    "_probe/": true,
+    "tests/mat/": true,
+    "tests/fakegame/": true,
+    "gui/dist/assets/": true,
+    "tools-src/**/obj/": true,
+    "tools-src/**/bin/": true
+  },
+  "search.exclude": {
+    "python/": true,
+    "build_out/": true,
+    "_probe/": true,
+    "dist/": true,
+    "tests/mat/": true,
+    "tests/fakegame/": true,
+    "gui/dist/": true,
+    "kit/": true,
+    "tools-src/**/obj/": true,
+    "tools-src/**/bin/": true,
+    "logs/*.txt": true
+  },
+  "files.watcherExclude": {
+    "**/python/**": true,
+    "**/build_out/**": true,
+    "tests/mat/**": true,
+    "tests/fakegame/**": true,
+    "gui/dist/**": true
+  },
+
+  // ---- Editor -------------------------------------------------------------
+  "[vue]": { "editor.defaultFormatter": "Vue.volar", "editor.tabSize": 2 },
+  "[javascript]": { "editor.tabSize": 2 },
+  "[json]": { "editor.tabSize": 2 },
+  "[python]": { "editor.tabSize": 4 },
+  "[powershell]": { "editor.tabSize": 4 },
+  "editor.rulers": [100],
+
+  // ---- Terminal -----------------------------------------------------------
+  // npm.ps1 is blocked by this machine's execution policy -- use npm.cmd.
+  "terminal.integrated.defaultProfile.windows": "PowerShell"
+}

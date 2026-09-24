@@ -1,0 +1,70 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      // The normal way to develop the UI: backend on the fixed dev port + the
+      // WebView2 window pointed at the Vite dev server (start it with
+      // `cd gui/frontend && npm.cmd run dev`), DevTools enabled.
+      "name": "GUI 后端 (--dev, 自动开 DevTools)",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/gui_main.py",
+      "args": ["--dev"],
+      "console": "integratedTerminal",
+      "cwd": "${workspaceFolder}",
+      "justMyCode": true
+    },
+    {
+      // Backend only, no window: use the printed ?t=<token> URL in a browser.
+      "name": "GUI 后端 (--headless)",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/gui_main.py",
+      "args": ["--headless"],
+      "console": "integratedTerminal",
+      "cwd": "${workspaceFolder}",
+      "justMyCode": true
+    },
+    {
+      // The full source self-test: guide, layout, divider drag, native dialog
+      // and a real build driven from the page.  Breakpoints work in gui/desktop.py.
+      "name": "GUI 源码自检 (--selftest all)",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/gui/desktop.py",
+      "args": [
+        "--selftest", "--selftest-ui", "--selftest-shell",
+        "--paks", "${workspaceFolder}/tests/fakegame",
+        "--srcm", "${workspaceFolder}/tests/mat/demo",
+        "--log-file", "${workspaceFolder}/logs/vscode_selftest.txt"
+      ],
+      "console": "integratedTerminal",
+      "cwd": "${workspaceFolder}",
+      "justMyCode": true
+    },
+    {
+      // CLI without touching the game folder (L0~L4 + every gate).
+      "name": "CLI dry-run (沙箱)",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/cli/build_srcm.py",
+      "args": [
+        "--paks", "${workspaceFolder}/tests/fakegame",
+        "--srcm", "${workspaceFolder}/tests/mat/demo",
+        "--dry-run"
+      ],
+      "console": "integratedTerminal",
+      "cwd": "${workspaceFolder}",
+      "justMyCode": true
+    },
+    {
+      "name": "当前文件",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${file}",
+      "console": "integratedTerminal",
+      "cwd": "${workspaceFolder}",
+      "justMyCode": true
+    }
+  ]
+}
