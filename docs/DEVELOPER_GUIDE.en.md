@@ -84,7 +84,7 @@ own. **There is no hard-coded path anywhere in the code.**
 
 | Switch | Meaning |
 |---|---|
-| `-Fit cover` (default) | scale to fill 1920×1080 and crop the centre (for anime art, cropping beats black bars) |
+| `-Fit cover` (default) | scale to fill the target canvas (2560×1440 since v1.1.0) and crop the centre (for anime art, cropping beats black bars) |
 | `-Fit contain` | scale to fit and pad with `(18,18,22)` bars; not a single pixel is resampled |
 | `-DryRun` | run L0~L4 only (build the container + every gate); **never touches the game folder** |
 | `-Combined` | **accumulate** on top of the previous `out_patch` build instead of rebuilding from the native tables. The carried state is `out_patch\work\manifest.json` plus the legacy tree next to it; **a failed run does not eat it**, and with no history it says `nothing to carry` outright |
@@ -139,8 +139,16 @@ for eyeballing.
 * **Backgrounds**: clone a native 1920×1080 `PF_DXT1` shell → `da-patch namerepl`
   changes the internal identity **in all three places** (`FolderName` + name-table
   package path + export ObjectName; changing only the file name makes the
-  container register the old package id) → replace the 11 mip levels with the
-  same-length payload using our own (bug-fixed) BC1 encoder.
+  container register the old package id) → encode with our own (bug-fixed) BC1
+  encoder **at the target canvas** (2560×1440 / 12 levels since v1.1.0) →
+  **rebuild the whole `.uexp`** and fix the uasset `SerialSize`.
+  Two guards make that safe: (1) at L0 the byte model must reproduce the shell
+  **byte for byte at its own size** (`texture.roundtrip_check`) - the game's own
+  4096×2048 atlas uses a *different* cooked layout and is refused by that gate
+  rather than force-fitted; (2) A6 reads the rebuilt texture back **out of the
+  delivered container** and demands both `SizeX/SizeY` pairs, `SizeZ`, `MipCount`,
+  `PixelFormat` and `DataSize` match the target canvas (see §3.3 in the Chinese
+  guide for the full field table).
 * **Audio**: clone the smallest BINKA shell → keep the **streaming** path, swap
   `AudioFormat` to `"PCM"` and go **single-chunk inline**, with the payload being
   **the whole RIFF/WAVE file, untouched**; then fix the legacy uasset tail's Zen

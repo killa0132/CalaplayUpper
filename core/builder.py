@@ -33,16 +33,16 @@ import time
 from dataclasses import asdict, dataclass, field
 from typing import Dict, List, Optional, Sequence, Tuple
 
-from . import bc1, config, texture
+from . import atlas, bc1, config, texture
 from .common import (BuildError, Log, ProcResult, ensure_dir, hardlink_or_copy,
                      human, reconfigure_stdio, rmtree, run, run_ok, sha16,
                      sha256_bytes, sha256_file)
-from .da import (AudioRow, BgRow, append_audio_rows, append_bg_rows,
-                 assert_append_only, native_audio_count, parse_imports)
+from .da import (AudioRow, BgRow, append_audio_rows, append_bg_rows, append_mi_refs,
+                 assert_append_only, native_audio_count, parse_imports, probe_names)
 from .kit import FFMPEG_HELP, Kit, load_kit
 from .wavutil import compliance, read_wav, verify_identity
 
-TOOL_VERSION = "1.0.0"
+TOOL_VERSION = "1.1.0"
 
 
 # --------------------------------------------------------------------------
@@ -65,6 +65,20 @@ class Material:
     upgraded: bool = False
     payload_bytes: int = 0
     note: str = ""
+    # CP-34: the preview material instance this background's DA row points at (@30)
+    mi_obj: str = ""
+    mi_pkg: str = ""
+    mi_legacy_rel: str = ""
+    mi_ref: int = 0
+    mi_tex_ref: int = 0
+    mi_scalars: str = ""
+    mi_absent: str = ""
+    mi_sha256: str = ""
+    # CP-37: the preview-atlas cell this background owns (index 165..223 on the game's own grid,
+    # -1 = not placed: no MI/atlas for this material, e.g. -NoAtlas/-NoThumb or beyond 59)
+    cell_index: int = -1
+    mi_tex_obj: str = ""          # what SourceTexture must resolve to (atlas or our texture)
+    tile: str = ""                # work/norm/<name>.tile: the 250x141 RGB tile for the atlas
 
 
 @dataclass
@@ -79,6 +93,8 @@ class Ctx:
     kit_dir: Optional[str] = None
     keep_work: bool = False
     deploy: bool = True
+    no_thumb: bool = False          # -NoThumb: do not author preview MIs (v1 behaviour)
+    no_atlas: bool = False          # -NoAtlas: keep the CP-36 shape (whole-image MI, no atlas)
 
     # discovered
     game: config.GamePaths = None
@@ -108,6 +124,22 @@ class Builder:
         self.rollback: Dict = {}
         self._t0 = time.time()
         self._prev_manifest: Dict = {}
+        # CP-35 route B: the BC1 mip table of the TARGET canvas (index, size, size_x, size_y).
+        # L0 re-derives it and proves the uexp byte model on the shell before anything uses it.
+        self.mip_want = texture.mip_table(config.TARGET_W, config.TARGET_H)
+        # CP-34: the preview-MI shell we clone (empty when -NoThumb)
+        self.mi_shell_ua = ""
+        self.mi_shell_ux = ""
+        self.mi_shell_obj = ""
+        self.mi_shell_pkg = ""
+        self.mi_folder = ""
+        # CP-37: the game's preview atlas (empty when -NoAtlas/-NoThumb or no background)
+        self.atlas_base_ua = ""
+        self.atlas_base_ux = ""
+        self.atlas_dump_sizes = []
+        self.atlas_rel = ""
+        self.atlas_sha256 = ""
+        self.atlas_report = {}
 
     # ------------------------------------------------------------------ util
     def _stage(self, name: str, fn):
@@ -206,6 +238,7 @@ class Builder:
                       "(the installed _P gets replaced). Add -Combined to accumulate.")
 
         self._scan_materials()
+        self._check_bg_aspects()
         self._check_limits()
 
         # stage the native containers (hardlinks: never write the game folder)
@@ -223,6 +256,18 @@ class Builder:
 
         # extract the shells + DA tables from the NATIVE containers only
         self._extract_native_bases()
+        if not c.no_thumb:
+            self._extract_mi_shell()
+        else:
+            log("L0", "NOTE: -NoThumb -> preview MIs are NOT authored; every new background "
+                      "row inherits the clone source's @30 (the thumbnail stays the native "
+                      "tile, exactly like v1)")
+        if not c.no_atlas and not c.no_thumb:
+            self._extract_atlas()
+        elif c.no_atlas:
+            log("L0", "NOTE: -NoAtlas -> the game's preview atlas is NOT appended; every preview "
+                      "MI keeps the whole-image shape (the timeline cell and the side preview "
+                      "then show the native atlas tile 0,0, as before CP-37)")
 
         # record native hashes (proof we never touch them)
         self.native_hashes = {}
@@ -306,6 +351,65 @@ class Builder:
                     kind=kind, src=os.path.abspath(os.path.join(folder, f)), rel=rel,
                     name=name, key=key, pkg=pkg, obj=name,
                     source_sha256=sha256_file(os.path.join(folder, f))))
+
+    def _check_bg_aspects(self) -> None:
+        """Refuse portrait / square backgrounds unless -Fit contain was asked for.
+
+        Why this exists: the game renders a background through a *fixed* 1920x1080
+        sprite (`MMI_BackgroundSelector` bakes SpriteWidth/SpriteHeight), and the
+        community measured what that does to a non-landscape source -- the engine
+        stretches it to fill.  `cover` would silently crop such a picture instead,
+        so it refuses them outright; `-Fit contain` is the explicit escape (it
+        centres the picture on a 1920x1080 canvas padded with LETTERBOX_RGB).
+        A landscape picture that is not 16:9 is accepted and *warned about*.
+
+        Unreadable files are deliberately left to L1, which already reports them
+        with the canonical "cannot decode image" error.
+        """
+        c, log = self.c, self.log
+        from PIL import Image
+        bad: List[str] = []
+        warned = 0
+        for m in [x for x in self.materials if x.kind == config.KIND_BG]:
+            try:
+                with Image.open(m.src) as im:
+                    w, h = im.size
+            except Exception:  # noqa: BLE001 - L1 reports undecodable material
+                log("L0", "NOTE: %s could not be opened for the aspect check "
+                          "(L1 will report it properly)" % m.rel)
+                continue
+            kind = config.aspect_kind(w, h)
+            ratio = float(w) / float(h)
+            log("L0", "  aspect %-28s %5dx%-5d %-9s ratio %.3f%s"
+                % (m.rel, w, h, kind, ratio,
+                   "" if config.is_16_9(w, h) else "  (NOT 16:9)"))
+            if kind != "landscape":
+                zh = {"portrait": "竖屏", "square": "正方形"}[kind]
+                if c.fit == "contain":
+                    msg = ("检测到%s图片 / %s source: %s (%dx%d) —— 按 -Fit contain 居中补 "
+                           "(18,18,22) 黑边到 %dx%d；不加 -Fit contain 时本工具会拒绝它"
+                           % (zh, kind, m.rel, w, h, config.TARGET_W, config.TARGET_H))
+                    c.warnings.append(msg)
+                    log("L0", "WARN: " + msg)
+                else:
+                    bad.append("%s (%dx%d, %s/%s)" % (m.rel, w, h, zh, kind))
+                    continue
+            elif not config.is_16_9(w, h):
+                warned += 1
+                msg = ("非 16:9 图片 / not 16:9: %s (%dx%d, 宽高比 %.3f) —— 直接用原图在游戏内"
+                       "会被拉伸变形；本工具已按 -Fit %s 规范化为 %dx%d 再打包"
+                       % (m.rel, w, h, ratio, c.fit, config.TARGET_W, config.TARGET_H))
+                c.warnings.append(msg)
+                log("L0", "WARN: " + msg)
+        if bad:
+            shown = ", ".join(bad[:5]) + (" …(+%d more)" % (len(bad) - 5) if len(bad) > 5 else "")
+            raise BuildError(
+                "L0", "不支持的宽高比（竖屏/正方形）/ unsupported aspect ratio: %s" % shown,
+                config.ASPECT_REJECT_HINT)
+        if warned:
+            log("L0", "%d background(s) are not 16:9 -- they were normalised to %dx%d "
+                      "(the game stretches an unnormalised source)" % (warned, config.TARGET_W,
+                                                                       config.TARGET_H))
 
     def _check_limits(self) -> None:
         c, log = self.c, self.log
@@ -402,6 +506,17 @@ class Builder:
         texture.locate_mips(tex_ux, self.tex_mips)
         log("L0", "texture shell mip offsets verified (header=%d B, +%d B between mips)"
             % (self.tex_mips[0].offset, texture.INTER_MIP))
+        # CP-35 route B: prove the byte model on the shell itself *before* anything rebuilds it at
+        # another size - same size + the file's own payloads must reproduce the file byte for byte.
+        texture.roundtrip_check(tex_ux, self.tex_mips, log, "L0")
+        self.mip_want = texture.mip_table(config.TARGET_W, config.TARGET_H)
+        log("L0", "target canvas %dx%d -> %d BC1 mips -> rebuilt uexp %d B "
+                  "(shell is %dx%d / %d mips / %d B)"
+            % (config.TARGET_W, config.TARGET_H, len(self.mip_want),
+               texture.HEADER_LEN + sum(x[1] for x in self.mip_want)
+               + texture.INTER_MIP * len(self.mip_want) + texture.TAIL_ZEROS + len(texture.TAG),
+               config.TEX_SHELL_EXPECTED_SIZE[0], config.TEX_SHELL_EXPECTED_SIZE[1],
+               len(self.tex_mips), os.path.getsize(tex_ux)))
 
         for tag, pkg in (("DA_Backgrounds", config.DA_BACKGROUNDS),
                          ("DA_BGM", config.DA_BGM),
@@ -420,11 +535,183 @@ class Builder:
             log("L0", "  %-16s native rows = %d (uexp %d B)"
                 % (tag, self.da_native_counts[tag], os.path.getsize(ux)))
 
+    # --------------------------------------------------------------- MI shell
+    def _extract_mi_shell(self) -> None:
+        """Locate + extract the preview material instance our new rows must follow.
+
+        Derivation (nothing hardcoded): take `DA_Backgrounds` row 0, read its `@30`
+        FPackageIndex, resolve it against the DA's own ImportMap -> the MI object
+        name, and the MI package path from that import's outer (the Package import).
+        Then extract exactly that package out of the *native* containers.
+        """
+        c, log, kit = self.c, self.log, self.kit
+        da_ua = self.da_base["DA_Backgrounds"]
+        b = open(os.path.splitext(da_ua)[0] + ".uexp", "rb").read()
+        cnt = struct.unpack_from("<I", b, 8)[0]
+        if cnt < 1:
+            raise BuildError("L0", "DA_Backgrounds has no row to take @30 from")
+        src_ref = struct.unpack_from("<i", b, 12 + 30)[0]
+        imp = parse_imports(kit.da(["imports", da_ua, kit.usmap], log, "L0").out)
+        ref_i = -src_ref - 1
+        if not (0 <= ref_i < len(imp)):
+            raise BuildError("L0", "DA row 0 @30=%d -> import index %d out of range (%d)"
+                             % (src_ref, ref_i, len(imp)))
+        obj, cls, outer = imp[ref_i][3], imp[ref_i][2], imp[ref_i][4]
+        if cls != "MaterialInstanceConstant":
+            raise BuildError("L0", "DA row 0 @30=%d -> import[%d] is a %s, expected a "
+                                   "MaterialInstanceConstant" % (src_ref, ref_i, cls))
+        pkg_i = -outer - 1
+        if not (0 <= pkg_i < len(imp)):
+            raise BuildError("L0", "the MI import has no package import (outer=%d)" % outer)
+        mi_pkg_path = imp[pkg_i][3]
+        log("L0", "preview MI source (DA row 0 @30=%d): %s   package %s" % (src_ref, obj, mi_pkg_path))
+        if not mi_pkg_path.startswith("/Game/"):
+            raise BuildError("L0", "the MI package path is not under /Game/: %s" % mi_pkg_path)
+
+        od = ensure_dir(os.path.join(c.work, "native_raw", "mi_shell"))
+        kit.to_legacy(self.native_paks, od, obj, log, "L0")
+        suffix = config.legacy_suffix_from_pkg(mi_pkg_path) + ".uasset"
+        found = None
+        for root, _dirs, files in os.walk(od):
+            for f in files:
+                full = os.path.join(root, f)
+                rel = os.path.relpath(full, od).replace("\\", "/")
+                parts = rel.split("/")
+                if (len(parts) >= 3 and parts[1].lower() == "content"
+                        and "/".join(parts[2:]) == suffix):
+                    found = full
+                    break
+            if found:
+                break
+        if not found:
+            raise BuildError("L0", "the preview MI package was not extracted: %s" % suffix, od)
+        dest_dir = ensure_dir(os.path.join(c.work, "base",
+                                           os.path.dirname(config.legacy_rel_from_pkg(mi_pkg_path))))
+        for ext in (".uasset", ".uexp"):
+            s = os.path.splitext(found)[0] + ext
+            if os.path.isfile(s):
+                shutil.copy2(s, os.path.join(dest_dir, os.path.basename(s)))
+        self.mi_shell_ua = os.path.join(dest_dir, os.path.basename(found))
+        self.mi_shell_ux = os.path.splitext(self.mi_shell_ua)[0] + ".uexp"
+        self.mi_shell_obj = obj
+        self.mi_shell_pkg = mi_pkg_path
+        self.mi_folder = mi_pkg_path.rsplit("/", 1)[0]
+        if not os.path.isfile(self.mi_shell_ux):
+            raise BuildError("L0", "the preview MI shell has no .uexp", self.mi_shell_ux)
+        imps = parse_imports(kit.da(["imports", self.mi_shell_ua, kit.usmap], log, "L0").out)
+        if not [x for x in imps if x[2] == "MaterialInstanceConstant"
+                and x[3] == config.MI_PARENT_FRAGMENT]:
+            raise BuildError("L0", "the preview MI shell (%s) does not reference the parent "
+                                   "material %s" % (obj, config.MI_PARENT_FRAGMENT),
+                             "imports: %s" % "; ".join("%s %s" % (x[2], x[3]) for x in imps))
+        log("L0", "preview MI shell OK: %s  uasset=%s uexp=%s  parent=%s  imports=%d"
+            % (obj, human(os.path.getsize(self.mi_shell_ua)),
+               human(os.path.getsize(self.mi_shell_ux)), config.MI_PARENT_FRAGMENT, len(imps)))
+
+    # --------------------------------------------------------------- atlas
+    def _extract_atlas(self) -> None:
+        """Extract the game's preview atlas and give every background its own cell.
+
+        The cell index is the game's own grid position (165 upwards = the free band after the 165
+        native thumbnails).  A `-Combined` run keeps the index the previous build gave that
+        background (read back from `manifest.json`) so the tile stays where the DA row's `@30`
+        points; only genuinely new backgrounds take the next free index.
+        """
+        c, log, kit = self.c, self.log, self.kit
+        bgs = [m for m in self.materials if m.kind == config.KIND_BG]
+        if not bgs:
+            log("L0", "no background material -> the preview atlas is not needed")
+            return
+        nat = ensure_dir(os.path.join(c.work, "native_raw", "atlas"))
+        kit.to_legacy(self.native_paks, nat, config.ATLAS_OBJ, log, "L0")
+        suffix = config.legacy_suffix_from_pkg(config.ATLAS_PKG) + ".uasset"
+        found = None
+        for root, _dirs, files in os.walk(nat):
+            for f in files:
+                full = os.path.join(root, f)
+                rel = os.path.relpath(full, nat).replace("\\", "/")
+                parts = rel.split("/")
+                if (len(parts) >= 3 and parts[1].lower() == "content"
+                        and "/".join(parts[2:]) == suffix):
+                    found = full
+                    break
+            if found:
+                break
+        if not found:
+            raise BuildError("L0", "the preview atlas was not extracted: %s" % suffix, nat)
+        dest_dir = ensure_dir(os.path.join(
+            c.work, "base", os.path.dirname(config.legacy_rel_from_pkg(config.ATLAS_PKG))))
+        for ext in (".uasset", ".uexp"):
+            s = os.path.splitext(found)[0] + ext
+            if os.path.isfile(s):
+                shutil.copy2(s, os.path.join(dest_dir, config.ATLAS_OBJ + ext))
+        self.atlas_base_ua = os.path.join(dest_dir, config.ATLAS_OBJ + ".uasset")
+        self.atlas_base_ux = os.path.join(dest_dir, config.ATLAS_OBJ + ".uexp")
+        if not os.path.isfile(self.atlas_base_ux):
+            raise BuildError("L0", "the preview atlas has no .uexp", self.atlas_base_ux)
+        # tex-inspect's per-mip sizes are the independent cross-check of our own structural parse
+        dump = kit.tex_dump(self.native_paks, config.ATLAS_PKG,
+                            os.path.join(c.work, "texdump"), log, "L0")
+        self.atlas_dump_sizes = [m.size for m in texture.parse_mips(dump)]
+        log("L0", "preview atlas: %s  uexp=%s  mips=%d sizes=%s"
+            % (config.ATLAS_PKG, human(os.path.getsize(self.atlas_base_ux)),
+               len(self.atlas_dump_sizes), self.atlas_dump_sizes))
+
+        prev = {str(pm.get("name", "")).lower(): int(pm.get("cell_index", -1))
+                for pm in self._prev_manifest.get("materials", []) if pm.get("name")}
+        taken: set = set()
+        nxt = config.ATLAS_FIRST_CELL
+        overflow = []
+        for m in bgs:
+            want = prev.get(m.name.lower(), -1)
+            if want < config.ATLAS_FIRST_CELL or want >= config.ATLAS_SLOTS or want in taken:
+                while nxt in taken:
+                    nxt += 1
+                want = nxt
+            if want >= config.ATLAS_SLOTS:
+                overflow.append(m.name)
+                m.cell_index = -1
+                continue
+            m.cell_index = want
+            taken.add(want)
+            nxt = max(nxt, want + 1)
+            if m.name.lower() in prev and prev[m.name.lower()] >= config.ATLAS_FIRST_CELL:
+                log("L0", "  atlas cell %3d (col %2d, row %2d) reused from the previous manifest "
+                          "for '%s'" % (want, want % config.ATLAS_COLS,
+                                        want // config.ATLAS_COLS, m.name))
+            else:
+                log("L0", "  atlas cell %3d (col %2d, row %2d) @ (%d,%d) -> '%s'"
+                    % (want, want % config.ATLAS_COLS, want // config.ATLAS_COLS,
+                       *config.atlas_cell_xy(want), m.name))
+        if overflow:
+            msg = ("%d background(s) have no free preview-atlas cell (the game has exactly %d): %s. "
+                   "Their preview MI keeps the whole-image shape, so their thumbnail shows the "
+                   "native atlas tile instead." % (len(overflow), config.ATLAS_MAX_CELLS,
+                                                   ", ".join(overflow[:6])))
+            c.warnings.append(msg)
+            log("L0", "WARN: " + msg)
+        log("L0", "atlas cells assigned: %d of %d free" % (len(taken), config.ATLAS_MAX_CELLS))
+
+    def _carried_atlas(self) -> str:
+        """`-Combined`: the previous build's atlas is the base (it already holds the carried cells).
+
+        A fresh (non-combined) run starts from the game's own atlas instead.
+        """
+        prev = self.c.prev_work
+        if not prev:
+            return ""
+        p = os.path.join(prev, "legacy",
+                         config.legacy_rel_from_pkg(config.ATLAS_PKG) + ".uexp")
+        ok = os.path.isfile(p) and os.path.isfile(os.path.splitext(p)[0] + ".uasset")
+        return p if ok else ""
+
     def _mip_wh(self, i: int) -> Tuple[int, int]:
-        w, h = config.TARGET_W, config.TARGET_H
-        for _ in range(i):
-            w, h = max(1, w // 2), max(1, h // 2)
-        return w, h
+        """Dimensions of mip i of the TARGET canvas (shift rule, same as the engine)."""
+        tbl = texture.mip_table(config.TARGET_W, config.TARGET_H)
+        if i >= len(tbl):
+            raise BuildError("L0", "mip %d is outside the %dx%d chain (%d levels)"
+                             % (i, config.TARGET_W, config.TARGET_H, len(tbl)))
+        return tbl[i][2], tbl[i][3]
 
     # ================================================================= L1
     def l1(self) -> None:
@@ -447,15 +734,19 @@ class Builder:
                 log("L1", "[%s] %s  %dx%d  -> %s" % (m.kind, m.rel, src.size[0], src.size[1], note))
                 levels = bc1.mip_chain(fitted)
                 enc = bc1.encode_chain(levels, 2)
-                if len(enc) != len(self.tex_mips):
-                    raise BuildError("L1", "%s produced %d mip levels, the cooked shell has %d"
-                                     % (m.rel, len(enc), len(self.tex_mips)))
+                # CP-35 route B: the expectation comes from the TARGET canvas, not from the shell's
+                # 1920x1080 mip table - the uexp is rebuilt (texture.rebuild), not patched in place.
+                want = self.mip_want
+                if len(enc) != len(want):
+                    raise BuildError("L1", "%s produced %d mip levels, %dx%d needs %d"
+                                     % (m.rel, len(enc), config.TARGET_W, config.TARGET_H, len(want)))
                 chain_path = os.path.join(norm, "%s.bc1chain" % m.name)
                 with open(chain_path, "wb") as f:
                     for i, e in enumerate(enc):
-                        if len(e) != self.tex_mips[i].size:
-                            raise BuildError("L1", "mip%d of %s is %d B, shell slot is %d B"
-                                             % (i, m.rel, len(e), self.tex_mips[i].size))
+                        if len(e) != want[i][1]:
+                            raise BuildError("L1", "mip%d of %s is %d B, %dx%d mip%d needs %d B"
+                                             % (i, m.rel, len(e), want[i][2], want[i][3], i,
+                                                want[i][1]))
                         f.write(e)
                 dec = bc1.decode_bc1(enc[0], config.TARGET_W, config.TARGET_H)
                 import numpy as np
@@ -478,6 +769,14 @@ class Builder:
                             % os.path.join(prev, "%s_preview.png" % m.name))
                     log("L1", "WARN: %s passed only because of -Force (PSNR %.2f dB < %.1f)"
                         % (m.rel, q["psnr"], min_psnr))
+                if m.cell_index >= 0:
+                    tile = atlas.tile_from_canvas(fitted)
+                    m.tile = os.path.join(norm, "%s.tile" % m.name)
+                    with open(m.tile, "wb") as f:
+                        f.write(tile.tobytes())
+                    log("L1", "  atlas tile %dx%d for cell %d -> %s (%d B, %.1f s)"
+                        % (tile.shape[1], tile.shape[0], m.cell_index,
+                           os.path.basename(m.tile), os.path.getsize(m.tile), time.time() - t0))
 
         # ---- audio
         auds = [m for m in self.materials if m.kind != config.KIND_BG]
@@ -568,12 +867,17 @@ class Builder:
                     raise BuildError("L2", "namerepl produced no %s" % new_ua)
                 raw = open(os.path.join(norm, "%s.bc1chain" % m.name), "rb").read()
                 encs, off = [], 0
-                for mp in self.tex_mips:
-                    encs.append(raw[off:off + mp.size])
-                    off += mp.size
+                for _i, size, _x, _y in self.mip_want:
+                    encs.append(raw[off:off + size])
+                    off += size
                 if off != len(raw):
-                    raise BuildError("L2", "bc1 chain length mismatch for %s" % m.name)
-                texture.replace_mips(new_ux, self.tex_mips, encs, log, "L2")
+                    raise BuildError("L2", "bc1 chain length mismatch for %s: %d of %d B consumed"
+                                     % (m.name, off, len(raw)))
+                # route B: whole-file rebuild at the target canvas + uasset SerialSize fix-up
+                texture.rebuild(new_ux, new_ua, self.tex_mips, encs, config.TARGET_W,
+                                config.TARGET_H, log, "L2")
+                if not c.no_thumb:
+                    self._build_mi(m, assets, ren, log)
             else:
                 wav = m.audio["wav"]
                 od = ensure_dir(os.path.join(ren, m.name))
@@ -596,6 +900,138 @@ class Builder:
             log("L2", "[%s] %s -> %s  (%s uasset, uexp %s)"
                 % (m.kind, m.name, m.legacy_rel, human(m.size_bytes),
                    human(os.path.getsize(os.path.join(dest_dir, m.obj + ".uexp")))))
+
+        # CP-37b: the container must ship the preview atlas whenever ANY row's `@30` MI points into
+        # it - and under `-Combined` that includes rows carried from the previous build, even when
+        # this run has no background material of its own.
+        if not c.no_atlas and not c.no_thumb and (self.atlas_base_ux or self._carried_atlas()):
+            self._build_atlas(assets, log)
+
+    def _build_atlas(self, assets: str, log: Log) -> None:
+        """Embed every new background's tile into the atlas and stage it as our own package.
+
+        Base = the previous build's atlas when `-Combined` (it already holds the carried cells),
+        otherwise the game's own atlas.  Equal length, uasset untouched, and proven here before it is
+        packed (A9/A9b are re-checked on the packed container in L4).
+        """
+        c = self.c
+        import numpy as np
+        cells = []
+        for m in self.materials:
+            if m.cell_index < 0 or not m.tile:
+                continue
+            tile = np.frombuffer(open(m.tile, "rb").read(), dtype=np.uint8)
+            cells.append((m.cell_index, tile.reshape(config.ATLAS_CELL_H, config.ATLAS_CELL_W, 3)))
+        if not cells:
+            carried_ux = self._carried_atlas()
+            if carried_ux:
+                # every cell is carried: the container is rebuilt from the legacy tree each run, so
+                # the previous atlas has to be shipped again (otherwise the carried rows lose it).
+                self.atlas_rel = (config.legacy_rel_from_pkg(config.ATLAS_PKG)
+                                  + ".uasset").replace("\\", "/")
+                dest = ensure_dir(os.path.join(assets, os.path.dirname(self.atlas_rel)))
+                for ext in (".uasset", ".uexp"):
+                    shutil.copy2(os.path.splitext(carried_ux)[0] + ext,
+                                 os.path.join(dest, config.ATLAS_OBJ + ext))
+                self.atlas_sha256 = sha256_file(os.path.join(dest, config.ATLAS_OBJ + ".uexp"))
+                self.atlas_report = {"bytes": os.path.getsize(
+                    os.path.join(dest, config.ATLAS_OBJ + ".uexp")), "cells": [], "quality": [],
+                    "a9": {}, "carried": True,
+                    "plan": None}
+                log("L2", "no new atlas cell this run -> the carried atlas ships as-is (%s)"
+                    % self.atlas_rel)
+                return
+            log("L2", "no atlas cell to write this run (nothing carried either)")
+            return
+        carried = self._carried_atlas()
+        base_ux = carried or self.atlas_base_ux
+        base_ua = os.path.splitext(base_ux)[0] + ".uasset"
+        log("L2", "preview atlas base = %s (%s)" % (base_ux, "previous build" if carried else "native"))
+        rep = atlas.stage_atlas(base_ux, base_ua, cells, os.path.join(c.work, "atlas"), log, "L2",
+                                dump_sizes=self.atlas_dump_sizes)
+        self.atlas_report = rep
+        self.atlas_rel = (config.legacy_rel_from_pkg(config.ATLAS_PKG) + ".uasset").replace("\\", "/")
+        self.atlas_sha256 = rep["sha256"]
+        dest = ensure_dir(os.path.join(assets, os.path.dirname(self.atlas_rel)))
+        for name, src in ((config.ATLAS_OBJ + ".uasset", rep["uasset"]),
+                          (config.ATLAS_OBJ + ".uexp", rep["uexp"])):
+            shutil.copy2(src, os.path.join(dest, name))
+        log("L2", "[atlas] %s <- %d cell(s): %s" % (self.atlas_rel, len(cells), human(rep["bytes"])))
+
+    def _build_mi(self, m: Material, assets: str, ren: str, log: Log) -> None:
+        """Author this background's preview material instance (`m.mi_obj`).
+
+        It is a clone of the game's own preview MI (identity changed in all three places).
+        Two shapes exist:
+
+        * **atlas shape** (`m.cell_index >= 0`, the CP-37 default): `SourceTexture` stays the game's
+          preview atlas (the shell's own import - nothing is appended) and the sprite parameters
+          describe *our cell*; the two coordinates are what the game copies into the right-hand
+          preview block and the timeline cell.
+        * **whole-image shape** (`-NoAtlas`, or no free cell, or `-NoThumb`): `SourceTexture` is
+          re-pointed at our 2K texture and the sprite parameters cover the whole frame - that is the
+          CP-34/CP-36 behaviour (the dropdown chip shows the 2K image, the two other surfaces show
+          the native atlas tile).
+        """
+        c, kit = self.c, self.kit
+        atlas_mode = m.cell_index >= 0 and not c.no_atlas
+        scalars = (config.mi_scalars_atlas(m.cell_index) if atlas_mode
+                   else dict(config.MI_SCALARS))
+        mi_obj = config.MI_OBJ_PREFIX + m.name
+        mi_pkg = "%s/%s" % (self.mi_folder, mi_obj)
+        od = ensure_dir(os.path.join(ren, mi_obj))
+        args = ["mimk", self.mi_shell_ua, kit.usmap, od, mi_obj, mi_pkg]
+        args += ["-", "-"] if atlas_mode else [m.pkg, m.obj]
+        args += ["%s=%g" % (k, v) for k, v in scalars.items()]
+        r = kit.da(args, log, "L2")
+        if not r.ok:
+            raise BuildError("L2", "da-patch mimk failed for %s" % mi_obj, r.tail())
+        mm = re.search(r"MIMK_OK obj=(\S+) pkg=(\S+) tex=(\S+)/(\S+) texRef=(-?\d+) imports=(\d+)"
+                       r" scalars=(\S*) absent=(\S*)", r.out)
+        if not mm:
+            raise BuildError("L2", "mimk did not report the MI it built for %s" % mi_obj, r.tail())
+        if mm.group(1) != mi_obj or mm.group(2) != mi_pkg:
+            raise BuildError("L2", "mimk reported the wrong identity for %s" % mi_obj, mm.group(0))
+        want_tex_obj = config.ATLAS_OBJ if atlas_mode else m.obj
+        if mm.group(4) != want_tex_obj:
+            raise BuildError("L2", "mimk pointed %s' SourceTexture at '%s', expected '%s'"
+                             % (mi_obj, mm.group(4), want_tex_obj), mm.group(0))
+        m.mi_obj = mi_obj
+        m.mi_pkg = mi_pkg
+        m.mi_tex_obj = want_tex_obj
+        m.mi_tex_ref = int(mm.group(5))
+        m.mi_scalars = mm.group(7)
+        m.mi_absent = mm.group(8)
+        m.mi_legacy_rel = (config.legacy_rel_from_pkg(mi_pkg) + ".uasset").replace("\\", "/")
+        new_ua = os.path.join(od, mi_obj + ".uasset")
+        new_ux = os.path.join(od, mi_obj + ".uexp")
+        if not (os.path.isfile(new_ua) and os.path.isfile(new_ux)):
+            raise BuildError("L2", "mimk produced no %s" % new_ua)
+        # prove the authored MI really renders what it should before it is packed
+        mp = kit.da(["miprobe", new_ua, kit.usmap], log, "L2")
+        if not mp.ok:
+            raise BuildError("L2", "miprobe failed on the MI just built for %s" % mi_obj, mp.tail())
+        want_tex = "MIPROBE texture name=SourceTexture ref=%d" % m.mi_tex_ref
+        if want_tex not in mp.out or ("Texture2D %s" % want_tex_obj) not in mp.out:
+            raise BuildError("L2", "the MI built for %s does not point SourceTexture at %s"
+                             % (mi_obj, want_tex_obj), mp.out.strip()[-500:])
+        for k, v in scalars.items():
+            line = "MIPROBE scalar name=%s value=%g" % (k, v)
+            if line in mp.out:
+                continue
+            if k in (m.mi_absent or ""):
+                continue
+            raise BuildError("L2", "the MI built for %s has no %s=%g" % (mi_obj, k, v),
+                             [x for x in mp.out.splitlines() if x.startswith("MIPROBE scalar")])
+        dest_dir = ensure_dir(os.path.join(assets, os.path.dirname(m.mi_legacy_rel)))
+        shutil.copy2(new_ua, os.path.join(dest_dir, mi_obj + ".uasset"))
+        shutil.copy2(new_ux, os.path.join(dest_dir, mi_obj + ".uexp"))
+        m.mi_sha256 = sha256_file(os.path.join(dest_dir, mi_obj + ".uasset"))
+        log("L2", "[%s] preview MI %s -> %s  (%s, %s mode, tex=%s, cell=%s, scalars=%s%s)"
+            % (m.kind, mi_obj, m.mi_legacy_rel, human(os.path.getsize(new_ua)),
+               "atlas" if atlas_mode else "whole-image", m.mi_tex_obj,
+               m.cell_index if m.cell_index >= 0 else "-", m.mi_scalars,
+               ("  absent: %s" % m.mi_absent) if m.mi_absent else ""))
 
     def _fix_zen_bulkmap(self, uasset: str, payload: int, log: Log, stage: str) -> None:
         """Zen FByteBulkData in the uexp is a 4-byte BulkDataMap index; retoc moves
@@ -650,10 +1086,19 @@ class Builder:
 
         self.da_out: Dict[str, str] = {}
         self.da_rows: Dict[str, List[Tuple[str, str, str]]] = {}
+        self.da_row_mats: Dict[str, List[Material]] = {}
         self.da_base_counts: Dict[str, int] = {}
+        # CP-37b: `-Combined` must NOT start from the previous build's already-appended table.
+        # `da-patch bgref`/`addname` re-serialize through UAssetAPI, and on an already-appended DA
+        # that grows the uexp by one row (+34 B) while the row count stays -> the L3 trailer gate
+        # refuses (the original `-Combined` bug, measured on native vs appended DA).
+        # Fix (user-approved): every table is rebuilt from the **native** table and the carried rows
+        # are appended again -- byte by byte -- together with this run's new rows (`append_bg_rows` /
+        # `append_audio_rows` are pure byte writers; only `bgref`/`addname` touch UAssetAPI, and they
+        # now only ever see the native baseline).
         for tag, kind in (("DA_Backgrounds", config.KIND_BG), ("DA_BGM", config.KIND_BGM),
                           ("DA_Ambient", config.KIND_AMBIENT), ("DA_Sounds", config.KIND_SOUND)):
-            base_ua = carried.get(tag) or self.da_base[tag]
+            base_ua = self.da_base[tag] if c.combined else (carried.get(tag) or self.da_base[tag])
             base_ux = os.path.splitext(base_ua)[0] + ".uexp"
             if not os.path.isfile(base_ux):
                 raise BuildError("L3", "base DA uexp missing for %s" % tag, base_ux)
@@ -665,21 +1110,36 @@ class Builder:
             before = open(os.path.splitext(cur_ua)[0] + ".uexp", "rb").read()
 
             rows = by_kind.get(kind, [])
-            if c.combined and rows:
-                keep, repl = [], []
+            if c.combined:
+                carry = [m for m in self._prev_materials() if m.kind == kind]
+                names = {m.name.lower() for m in carry}
+                keep = []
                 for r in rows:
-                    (repl if r.name.lower() in self._carried_names() else keep).append(r)
-                for r in repl:
-                    log("L3", "  UPGRADE: '%s' already exists in the carried build -> its asset "
-                              "is rebuilt in place, no duplicate DA row" % r.name)
-                    r.upgraded = True
-                rows = keep
-            if not rows and not carried.get(tag):
+                    if r.name.lower() in names:
+                        log("L3", "  UPGRADE: '%s' already exists in the carried build -> its asset "
+                                  "is rebuilt in place, its row is re-appended from the native table"
+                            % r.name)
+                        r.upgraded = True
+                    else:
+                        keep.append(r)
+                if carry:
+                    log("L3", "  -Combined: re-appending %d carried %s row(s) on the native baseline"
+                        % (len(carry), tag))
+                rows = carry + keep
+            if not rows:
                 log("L3", "%s: nothing to append" % tag)
             if rows and tag == "DA_Backgrounds":
-                cur_ua = append_bg_rows(kit, cur_ua, cur_dir,
-                                        [BgRow(r.key, r.pkg, r.obj) for r in rows],
-                                        base_count, log, "L3")
+                brow = [BgRow(r.key, r.pkg, r.obj, mi_obj=r.mi_obj, mi_pkg=r.mi_pkg) for r in rows]
+                if not c.no_thumb:
+                    # 1) grow the ImportMap by 2 entries per MI (append-only, proven)
+                    cur_ua = append_mi_refs(kit, cur_ua, cur_dir, brow, log, "L3")
+                    # 2) hand the per-row @30 over to the raw row appender
+                    for b, r in zip(brow, rows):
+                        r.mi_ref = b.mi_ref
+                    cur_ua = append_bg_rows(kit, cur_ua, cur_dir, brow, base_count, log, "L3",
+                                            allow_uasset_growth=True)
+                else:
+                    cur_ua = append_bg_rows(kit, cur_ua, cur_dir, brow, base_count, log, "L3")
             elif rows:
                 cur_ua = append_audio_rows(kit, cur_ua, cur_dir,
                                            [AudioRow(r.kind, r.key, r.pkg, r.obj) for r in rows],
@@ -694,6 +1154,7 @@ class Builder:
                                    base_count, tag, log, "L3")
             self.da_out[tag] = cur_ua
             self.da_rows[tag] = [(r.key, r.pkg, r.obj) for r in rows]
+            self.da_row_mats[tag] = list(rows)
             self.da_base_counts[tag] = base_count
             new_count = self._count_da(cur_ua, tag)
             log("L3", "%s: rows %d -> %d (+%d)" % (tag, base_count, new_count, len(rows)))
@@ -738,13 +1199,16 @@ class Builder:
         if not os.path.isdir(base):
             return res
         da_names = {"DA_Backgrounds", "DA_BGM", "DA_Ambient", "DA_Sounds"}
+        # CP-37: the atlas is rebuilt by us too (from the carried base), so it must not be carried
+        # a second time as a plain asset - that would race with the copy L4 makes from work/assets.
+        skip = da_names | {config.ATLAS_OBJ}
         mine = {m.name.lower() for m in self.materials}
         for root, _dirs, files in os.walk(base):
             for f in files:
                 if not f.endswith(".uasset"):
                     continue
                 stem = f[:-7]
-                if stem in da_names or stem.lower() in mine:
+                if stem in skip or stem.lower() in mine:
                     continue
                 full = os.path.join(root, f)
                 rel = os.path.relpath(full, base).replace("\\", "/")
@@ -790,6 +1254,13 @@ class Builder:
             shutil.copy2(os.path.join(src_dir, m.obj + ".uasset"), dst)
             shutil.copy2(os.path.join(src_dir, m.obj + ".uexp"),
                          os.path.splitext(dst)[0] + ".uexp")
+            if m.mi_obj:
+                mi_dst = os.path.join(legacy, m.mi_legacy_rel)
+                ensure_dir(os.path.dirname(mi_dst))
+                mi_src = os.path.join(c.work, "assets", os.path.dirname(m.mi_legacy_rel))
+                shutil.copy2(os.path.join(mi_src, m.mi_obj + ".uasset"), mi_dst)
+                shutil.copy2(os.path.join(mi_src, m.mi_obj + ".uexp"),
+                             os.path.splitext(mi_dst)[0] + ".uexp")
         for tag, ua in self.da_out.items():
             rel = config.legacy_rel_from_pkg(
                 {"DA_Backgrounds": config.DA_BACKGROUNDS, "DA_BGM": config.DA_BGM,
@@ -798,6 +1269,16 @@ class Builder:
             ensure_dir(os.path.dirname(dst))
             shutil.copy2(ua, dst)
             shutil.copy2(os.path.splitext(ua)[0] + ".uexp", os.path.splitext(dst)[0] + ".uexp")
+
+        # CP-37: the patched preview atlas is a same-path OVERRIDE of a native package, so it is
+        # copied like the DA tables (and it is the 5th deliberate override the ledger counts).
+        if self.atlas_rel:
+            src_dir = os.path.join(c.work, "assets", os.path.dirname(self.atlas_rel))
+            dst_dir = ensure_dir(os.path.join(legacy, os.path.dirname(self.atlas_rel)))
+            for ext in (".uasset", ".uexp"):
+                shutil.copy2(os.path.join(src_dir, config.ATLAS_OBJ + ext),
+                             os.path.join(dst_dir, config.ATLAS_OBJ + ext))
+            log("L4", "preview atlas override copied into the legacy tree: %s" % self.atlas_rel)
 
         files = 0
         for _r, _d, fs in os.walk(legacy):
@@ -822,10 +1303,13 @@ class Builder:
         pk = re.search(r"packages:\s*(\d+)", info)
         self.container["chunks"] = int(m.group(1)) if m else -1
         self.container["packages"] = int(pk.group(1)) if pk else -1
-        if self.container["packages"] != len(self.materials) + len(self.da_out) - \
+        if self.container["packages"] != len(self.materials) + len(self.da_out) + \
+                (1 if self.atlas_rel else 0) - \
                 (len(self._carried_asset_names()) if c.combined else 0):
-            log("L4", "NOTE: packages=%d, assets=%d, DA=%d (carried packages count too)"
-                % (self.container["packages"], len(self.materials), len(self.da_out)))
+            log("L4", "NOTE: packages=%d, assets=%d (%d preview MI), DA=%d, atlas=%d (carried "
+                      "packages count too)" % (self.container["packages"], len(self.materials),
+                                               len([m for m in self.materials if m.mi_obj]),
+                                               len(self.da_out), 1 if self.atlas_rel else 0))
 
         self._stage_paks_for_gates()
         self._gates()
@@ -851,6 +1335,20 @@ class Builder:
     def _carried_names(self) -> set:
         return {str(m.get("name", "")).lower()
                 for m in self._prev_manifest.get("materials", []) if m.get("name")}
+
+    def _prev_materials(self) -> List[Material]:
+        """The previous build's materials (read back from its manifest) as `Material` objects.
+
+        CP-37b: `-Combined` re-appends these rows onto the **native** tables, so it needs their
+        key/package/object/MI identity - exactly what the manifest stores.
+        """
+        out: List[Material] = []
+        for pm in self._prev_manifest.get("materials", []):
+            if not pm.get("name"):
+                continue
+            out.append(Material(**{k: v for k, v in pm.items()
+                                   if k in Material.__dataclass_fields__}))
+        return out
 
     def _carried_asset_names(self) -> List[str]:
         return [os.path.splitext(os.path.basename(rel))[0] for rel, _ in self._carried_assets()]
@@ -880,7 +1378,10 @@ class Builder:
 
         # ---- A0 shell round-trip fidelity
         a0 = []
-        for label, ua in (("texture_shell", self.tex_shell_ua), ("sound_shell", self.snd_shell_ua)):
+        shells = [("texture_shell", self.tex_shell_ua), ("sound_shell", self.snd_shell_ua)]
+        if getattr(self, "mi_shell_ua", ""):
+            shells.append(("mi_shell", self.mi_shell_ua))
+        for label, ua in shells:
             od = ensure_dir(os.path.join(c.work, "rt_%s" % label))
             r = kit.da(["roundtrip", ua, kit.usmap, od], log, "L4")
             ok = r.ok
@@ -903,15 +1404,19 @@ class Builder:
         bundles = [(cid, k) for cid, k in mine if k == "ExportBundleData"]
         hit = [cid for cid, _k in bundles if cid in base_ids]
         new = [cid for cid, _k in bundles if cid not in base_ids]
-        log("L4", "LEDGER new(0-hit)=%d override(1-hit)=%d expected overrides=%d"
-            % (len(new), len(hit), len(self.da_out)))
+        want_override = len(self.da_out) + (1 if self.atlas_rel else 0)
+        log("L4", "LEDGER new(0-hit)=%d override(1-hit)=%d expected overrides=%d "
+                  "(4 DA tables%s)"
+            % (len(new), len(hit), want_override,
+               " + the preview atlas" if self.atlas_rel else ""))
         self.ledger = {"new": sorted(new), "override": sorted(hit), "base_chunks": len(base_ids)}
         for cid, _k in bundles:
             log("L4", "  %s hits_in_base=%d" % (cid, 1 if cid in base_ids else 0))
-        self.gate("A5", len(hit) == len(self.da_out),
+        self.gate("A5", len(hit) == want_override,
                   "chunk-id ledger: %d brand-new package(s) with 0 hits in the native "
-                  "container, %d deliberate DA override(s) (expected %d)"
-                  % (len(new), len(hit), len(self.da_out)))
+                  "container, %d deliberate override(s) (expected %d: the 4 DA tables%s)"
+                  % (len(new), len(hit), want_override,
+                     " + the preview atlas" if self.atlas_rel else ""))
 
         # ---- A1/A2/A4 per audio material, straight out of the container
         a1, a2, a4 = [], [], []
@@ -1007,6 +1512,45 @@ class Builder:
                 raise BuildError("L4", "A6: %s round-tripped with different bytes" % rel,
                                  "%s vs %s" % (sha16(got_ux), sha16(want)))
             a6.append("%s=identical" % m.name)
+            if m.kind == config.KIND_BG:
+                # CP-35 route B: the rebuilt texture must DECLARE the canvas we built.  This reads
+                # the header straight out of the asset that came back out of the delivered container.
+                a6.append("%s:%s" % (m.name, self._assert_texture_header(got_ux, m, "L4")))
+                # ... and a real UE parser must be able to read it back.  This is the offline half of
+                # the size change: without a rewritten per-mip Zen BulkDataMap CUE4Parse reports
+                # `FirstMipToSerialize = -1` and ZERO mips for the rebuilt package (measured
+                # 2026-09-25) while every byte-level check above still passes.
+                od2 = ensure_dir(os.path.join(c.work, "verify_built"))
+                dump = kit.tex_dump(self.stage_paks, m.pkg, od2, log, "L4")
+                pf = texture.parse_platform(dump)
+                bad = []
+                if (pf["size_x"], pf["size_y"]) != (config.TARGET_W, config.TARGET_H):
+                    bad.append("SizeX/SizeY=%sx%s" % (pf["size_x"], pf["size_y"]))
+                if pf["pixel_format"] != config.TARGET_PIXEL_FORMAT:
+                    bad.append("PixelFormat=%r" % pf["pixel_format"])
+                if pf["mips"] != len(self.mip_want):
+                    bad.append("mips=%s" % pf["mips"])
+                got_h = [x.sha256 for x in texture.parse_mips(dump)]
+                want_h = m.quality.get("mip_sha256") or []
+                if got_h != want_h:
+                    bad.append("mip hashes differ (%s vs %s)" % (got_h[:2], want_h[:2]))
+                if bad:
+                    raise BuildError("L4", "A6: CUE4Parse cannot read the rebuilt texture %s" % m.name,
+                                     "; ".join(bad))
+                a6.append("%s:CUE4Parse %dx%d %s %dm" % (m.name, pf["size_x"], pf["size_y"],
+                                                         pf["pixel_format"], pf["mips"]))
+            if m.mi_obj:
+                mi_rel = m.mi_legacy_rel
+                mi_got = found.get(mi_rel[:-7] + ".uexp")
+                mi_want = os.path.join(c.work, "assets", os.path.dirname(m.mi_legacy_rel),
+                                       m.mi_obj + ".uexp")
+                if not mi_got:
+                    raise BuildError("L4", "A6: %s did not come back out of the container" % mi_rel,
+                                     "extracted %d files" % len(found))
+                if sha256_file(mi_got) != sha256_file(mi_want):
+                    raise BuildError("L4", "A6: %s round-tripped with different bytes" % mi_rel,
+                                     "%s vs %s" % (sha16(mi_got), sha16(mi_want)))
+                a6.append("%s=identical" % m.mi_obj)
         self.gate("A6", True,
                   "container round-trip: DA row counts hold and every built asset uexp is "
                   "byte-identical | " + " ".join(a6))
@@ -1054,6 +1598,142 @@ class Builder:
                       "DA rows in the container resolve to the intended display names and "
                       "soft paths (non-ASCII supported) | " + " ".join(a7[:8])
                       + (" …" if len(a7) > 8 else ""))
+
+        # ---- A8: the appended rows' `@30` really names OUR preview MI, and that MI
+        #      really renders our texture (this is the thumbnail channel).
+        a8 = []
+        bg_rows = self.da_row_mats.get("DA_Backgrounds") or []
+        got_da_ua = found.get(config.legacy_rel_from_pkg(config.DA_BACKGROUNDS)
+                              .replace("\\", "/") + ".uasset")
+        if bg_rows and not c.no_thumb:
+            if not got_da_ua:
+                raise BuildError("L4", "A8: DA_Backgrounds did not come back out of the container")
+            dimp = parse_imports(kit.da(["imports", got_da_ua, kit.usmap], log, "L4").out)
+            ddata = open(os.path.splitext(got_da_ua)[0] + ".uexp", "rb").read()
+            for i, m in enumerate(bg_rows):
+                row_i = self.da_base_counts["DA_Backgrounds"] + i
+                off = 12 + 34 * row_i
+                ref = struct.unpack_from("<i", ddata, off + 30)[0]
+                imp_i = -ref - 1
+                if not (0 <= imp_i < len(dimp)):
+                    raise BuildError("L4", "A8: row %d @30=%d -> import %d out of range (%d)"
+                                     % (row_i, ref, imp_i, len(dimp)))
+                _x, _cp, cls, obj, _outer = dimp[imp_i]
+                if cls != "MaterialInstanceConstant" or obj != m.mi_obj:
+                    raise BuildError("L4", "A8: row %d @30=%d resolves to %s/%s, expected "
+                                           "MaterialInstanceConstant/%s"
+                                     % (row_i, ref, cls, obj, m.mi_obj))
+                mi_rel = m.mi_legacy_rel.replace("\\", "/")
+                got_mi = found.get(mi_rel)
+                if not got_mi:
+                    raise BuildError("L4", "A8: %s did not come back out of the container" % mi_rel)
+                pr = kit.da(["miprobe", got_mi, kit.usmap], log, "L4")
+                if not pr.ok:
+                    raise BuildError("L4", "A8: miprobe failed on %s" % mi_rel, pr.tail())
+                if ("MIPROBE texture name=SourceTexture ref=%d" % m.mi_tex_ref) not in pr.out \
+                        or ("Texture2D %s" % (m.mi_tex_obj or m.obj)) not in pr.out:
+                    raise BuildError("L4", "A8: %s does not point SourceTexture at %s"
+                                     % (mi_rel, m.mi_tex_obj or m.obj), pr.out.strip()[-400:])
+                a8.append("%s@%d->%s(tex=%s)" % (m.mi_obj, ref, obj, m.mi_tex_obj or m.obj))
+            self.gate("A8", True,
+                      "every appended background row's @30 resolves to our own "
+                      "MaterialInstanceConstant and that MI renders our texture | "
+                      + " ".join(a8[:6]) + (" …" if len(a8) > 6 else ""))
+        else:
+            self.gate("A8", True, "skipped (no preview MI: %s)"
+                      % ("-NoThumb" if c.no_thumb else "no background material"))
+
+        # ---- A9/A9b: the patched preview atlas, re-checked **out of the packed container**
+        #      (CP-37).  A9  = the changed BC1 blocks are exactly ours (nothing native re-encoded
+        #                      outside its cell) + CUE4Parse reads the texture back mip for mip.
+        #      A9b = pixels inside the 165 NATIVE cells: mip0 must be byte-for-byte untouched;
+        #            mips >= 1 report the one-block seam (policy P1, user ruling 2026-09-26).
+        if self.atlas_rel:
+            atlas_ux = found.get(self.atlas_rel[:-7] + ".uexp")
+            if not atlas_ux:
+                raise BuildError("L4", "A9: the preview atlas did not come back out of the container",
+                                 "expected %s" % self.atlas_rel)
+            base_ux = self._carried_atlas() or self.atlas_base_ux
+            orig = open(base_ux, "rb").read()
+            newb = open(atlas_ux, "rb").read()
+            plan = self.atlas_report.get("plan")
+            if plan is None:
+                # every cell was carried: parse the shipped atlas so the same gates still run.
+                # With no new cell this run, `verify()` demands *zero* changed blocks, which is
+                # exactly the statement that a carried atlas must come back untouched.
+                plan = atlas.parse_plan(atlas_ux, log, "L4")
+            idx = [m.cell_index for m in self.materials if m.cell_index >= 0]
+            v = atlas.verify(orig, newb, plan, idx, log, "L4")
+            m0 = v["mips"][0]
+            cells_txt = ("%d..%d" % (min(idx), max(idx))) if idx else "none (all carried)"
+            self.gate("A9", v["a9_ok"],
+                      "preview atlas: %d changed BC1 block(s), every one inside our cell(s) "
+                      "%s (mip0 = %d blocks)" % (v["blocks_touched"], cells_txt, m0["diff_blocks"]))
+            self.gate("A9b", bool(v["a9b_mip0_zero"]),
+                      "native preview pixels: mip0 changed=%s (must be 0) | mips>=1 changed=%d "
+                      "max channel delta=%d (one-block seam, P1) | %s"
+                      % (m0.get("native_px_changed"), v["native_pixels_changed"],
+                         v["native_max_delta"],
+                         " ".join("mip%d:px=%s/max=%s" % (r["mip"], r.get("native_px_changed", "-"),
+                                                          r.get("native_max_delta", "-"))
+                                  for r in v["mips"][:5])))
+            dump = kit.tex_dump(self.stage_pure, config.ATLAS_PKG,
+                                os.path.join(c.work, "texdump_built"), log, "L4")
+            pf = texture.parse_platform(dump)
+            built = texture.parse_mips(dump)
+            if (pf["size_x"], pf["size_y"], pf["pixel_format"], pf["mips"]) != \
+                    (plan.width, plan.height, "PF_DXT1", len(plan.mips)):
+                raise BuildError("L4", "A9: CUE4Parse reads the built atlas as %sx%s %s / %s mips"
+                                 % (pf["size_x"], pf["size_y"], pf["pixel_format"], pf["mips"]),
+                                 "expected %dx%d PF_DXT1 / %d mips" % (plan.width, plan.height,
+                                                                       len(plan.mips)))
+            if [b.size for b in built] != [m[2] for m in plan.mips]:
+                raise BuildError("L4", "A9: CUE4Parse's mip sizes differ from the one we wrote")
+            for b, mm in zip(built, plan.mips):
+                if sha256_bytes(newb[mm[1]:mm[1] + mm[2]])[:16].upper() != b.sha256[:16]:
+                    raise BuildError("L4", "A9: CUE4Parse's mip%d sha256 does not match the payload "
+                                           "we wrote" % mm[0])
+            log("L4", "  A9 read-back: CUE4Parse sees %dx%d %s, %d mips, every payload matches"
+                % (pf["size_x"], pf["size_y"], pf["pixel_format"], pf["mips"]))
+        else:
+            why = ("-NoAtlas" if c.no_atlas else
+                   "-NoThumb" if c.no_thumb else "no background material")
+            self.gate("A9", True, "skipped (%s)" % why)
+            self.gate("A9b", True, "skipped (%s)" % why)
+
+        # ---- A10: our preview MIs carry the **native** (atlas) shape
+        a10 = []
+        if self.atlas_rel and not c.no_thumb:
+            for m in self.da_row_mats.get("DA_Backgrounds") or []:
+                if m.cell_index < 0:
+                    continue
+                got_mi = found.get(m.mi_legacy_rel.replace("\\", "/"))
+                if not got_mi:
+                    raise BuildError("L4", "A10: %s did not come back out of the container"
+                                     % m.mi_legacy_rel)
+                pr = kit.da(["miprobe", got_mi, kit.usmap], log, "L4")
+                if not pr.ok:
+                    raise BuildError("L4", "A10: miprobe failed on %s" % m.mi_legacy_rel, pr.tail())
+                want = config.mi_scalars_atlas(m.cell_index)
+                if ("Texture2D %s" % config.ATLAS_OBJ) not in pr.out:
+                    raise BuildError("L4", "A10: %s does not point SourceTexture at the atlas"
+                                     % m.mi_obj, pr.out.strip()[-400:])
+                miss = [k for k, val in want.items()
+                        if ("MIPROBE scalar name=%s value=%g" % (k, val)) not in pr.out
+                        and k not in (m.mi_absent or "")]
+                if miss:
+                    raise BuildError("L4", "A10: %s is missing the atlas scalars %s"
+                                     % (m.mi_obj, miss), pr.out.strip()[-400:])
+                a10.append("%s@cell%d(%g,%g)" % (m.mi_obj, m.cell_index,
+                                                 want["SpriteX"], want["SpriteY"]))
+            self.gate("A10", True,
+                      "every appended background's preview MI has the native atlas shape "
+                      "(SourceTexture=%s + cell/250/141/4096/2048) | %s%s"
+                      % (config.ATLAS_OBJ, " ".join(a10[:6]), " …" if len(a10) > 6 else ""))
+        else:
+            self.gate("A10", True, "skipped (no atlas MI: %s)"
+                      % ("-NoAtlas" if c.no_atlas else
+                         "-NoThumb" if c.no_thumb else "no background material"))
 
     def _probe_names(self, uasset: str) -> List[str]:
         r = self.kit.da(["probe", uasset, self.kit.usmap], self.log, "L4")
@@ -1128,6 +1808,33 @@ class Builder:
             self._rollback(moved, copied, paks, log)
             raise
 
+    def _assert_texture_header(self, uexp_path: str, m: Material, stage: str) -> str:
+        """Read the header of a rebuilt texture back and demand it describes what we built.
+
+        Route B changes the size of the package, so "the bytes round-tripped" is not enough: the
+        two SizeX/SizeY pairs, SizeZ, MipCount, PixelFormat and DataSize must all agree with the
+        target canvas, or the engine would read a stale/garbage platform description.
+        """
+        h = texture.parse_header(open(uexp_path, "rb").read())
+        want = (config.TARGET_W, config.TARGET_H)
+        bad = []
+        if (h["size_x"], h["size_y"]) != want:
+            bad.append("SizeX/SizeY@2/@6=%sx%s" % (h["size_x"], h["size_y"]))
+        if (h["size_x2"], h["size_y2"]) != want:
+            bad.append("SizeX/SizeY@74/@78=%sx%s" % (h["size_x2"], h["size_y2"]))
+        if h["size_z"] != 1:
+            bad.append("SizeZ@82=%s" % h["size_z"])
+        if h["mip_count"] != len(self.mip_want):
+            bad.append("MipCount@102=%s" % h["mip_count"])
+        if h["pixel_format"] != config.TARGET_PIXEL_FORMAT:
+            bad.append("PixelFormat=%r" % h["pixel_format"])
+        if h["data_size"] != h["length"] - 62:
+            bad.append("DataSize=%s (len-62=%s)" % (h["data_size"], h["length"] - 62))
+        if bad:
+            raise BuildError(stage, "%s: the rebuilt texture does not declare what we built"
+                             % m.name, "; ".join(bad))
+        return "%dx%d %s %dm" % (h["size_x"], h["size_y"], h["pixel_format"], h["mip_count"])
+
     def _verify_deployed(self, paks: str) -> None:
         c, log, kit = self.c, self.log, self.kit
         log("L5", "re-reading the container straight from the real game folder")
@@ -1142,6 +1849,27 @@ class Builder:
                                      % m.name,
                                      "live mips=%s expected=%s" % (got[:4], want[:4]))
                 log("L5", "  %s all %d mip hashes OK (mip0 %s)" % (m.name, len(got), got[0]))
+                # route B: and it must declare the canvas/format/mip count we rebuilt it as
+                pf = texture.parse_platform(out)
+                bad = []
+                if (pf["size_x"], pf["size_y"]) != (config.TARGET_W, config.TARGET_H):
+                    bad.append("SizeX/SizeY=%sx%s" % (pf["size_x"], pf["size_y"]))
+                if pf["pixel_format"] != config.TARGET_PIXEL_FORMAT:
+                    bad.append("PixelFormat=%r" % pf["pixel_format"])
+                if pf["mips"] != len(self.mip_want):
+                    bad.append("mips=%s" % pf["mips"])
+                if pf["num_mips_in_tail"] not in (0, None):
+                    bad.append("NumMipsInTail=%s" % pf["num_mips_in_tail"])
+                if bad:
+                    raise BuildError("L5", "deployed background %s does not declare what we built"
+                                     % m.name,
+                                     "want %dx%d %s / %d mips, got %s (file=%s)"
+                                     % (config.TARGET_W, config.TARGET_H,
+                                        config.TARGET_PIXEL_FORMAT, len(self.mip_want),
+                                        "; ".join(bad), m.obj))
+                log("L5", "  %s platform fields OK: %dx%d %s, %d mips, mips_in_tail=%s"
+                    % (m.name, pf["size_x"], pf["size_y"], pf["pixel_format"], pf["mips"],
+                       pf["num_mips_in_tail"]))
             else:
                 wav = os.path.join(c.out_patch, "verify", "%s_live_check.wav" % m.name)
                 out = kit.tex_audio_out(paks, m.pkg, wav, log, "L5")
@@ -1269,7 +1997,8 @@ class Builder:
             lines.append("| %s | %s | %s | %s | `%s` |"
                          % (m.kind, m.rel + " (carried)", m.name, m.key, m.pkg))
         lines += ["", "## Notes", ""]
-        lines.append("- Backgrounds are re-encoded to 1920x1080 DXT1 (BC1), 11 mip levels.")
+        lines.append("- Backgrounds are re-encoded to %dx%d DXT1 (BC1), %d mip levels, in a rebuilt "
+                     "uexp (route B)." % (config.TARGET_W, config.TARGET_H, len(self.mip_want)))
         lines.append("- Audio is embedded as uncompressed PCM s16le / 48 kHz inside a "
                      "streaming USoundWave; the payload is the RIFF/WAVE file itself.")
         if any(m.note.startswith("contain") for m in self.materials):
@@ -1302,10 +2031,24 @@ class Builder:
             "seconds": round(time.time() - self._t0, 2),
             "params": {"paks": c.paks_arg, "srcm": c.srcm_arg, "fit": c.fit, "force": c.force,
                        "dry_run": c.dry_run, "combined": c.combined,
+                       "no_thumb": c.no_thumb, "no_atlas": c.no_atlas,
+                       "max_bg": config.limit_max_bg(),
                        "ffmpeg": c.ffmpeg, "kit": (self.kit.root if self.kit else None)},
             "resolved": {"paks_dir": (c.game.paks_dir if c.game else None),
                          "out_patch": c.out_patch, "container_base":
                              (c.game.container_base if c.game else None)},
+            "atlas": ({"package": config.ATLAS_PKG, "legacy_rel": self.atlas_rel,
+                       "bytes": self.atlas_report.get("bytes"),
+                       "sha256": self.atlas_sha256,
+                       "cells": [{"index": m.cell_index, "x": config.atlas_cell_xy(m.cell_index)[0],
+                                  "y": config.atlas_cell_xy(m.cell_index)[1], "name": m.name}
+                                 for m in self.materials if m.cell_index >= 0],
+                       "blocks_changed": (self.atlas_report.get("a9") or {}).get("blocks_touched"),
+                       "native_pixels_mips_ge1": (self.atlas_report.get("a9") or {}).get(
+                           "native_pixels_changed"),
+                       "native_max_delta": (self.atlas_report.get("a9") or {}).get("native_max_delta"),
+                       "quality": self.atlas_report.get("quality", [])}
+                      if self.atlas_rel else None),
             "stages": self.stages,
             "materials": [asdict(m) for m in self.materials],
             "carried_materials": [asdict(m) for m in self.carried_materials],

@@ -1095,10 +1095,17 @@ def main(argv=None) -> int:
 
     import webview
     # ---- the "first run only" guide needs a real first run ------------------
-    # The durable store is a plain file in %LOCALAPPDATA%, so the self-test can
-    # reproduce "brand new user" (and, just as important, put the user's own
-    # settings back afterwards -- the same save/verify/restore rule as the
-    # clipboard).
+    # CP-37c: run the whole prefs dance in a throw-away folder.  The old "save / clear / restore
+    # the user's own settings" rule was LOSSY when the user had no other settings yet -- the
+    # restore deleted the real store, so their next launch popped the guide again (reported
+    # 2026-09-26).  With the redirect the self-test cannot touch the real file at all.
+    _selftest_prefs = os.path.join(os.environ.get("TEMP") or os.path.expanduser("~"),
+                                   "cala-selftest-prefs-%d" % os.getpid())
+    os.environ["CALA_PREFS_DIR"] = _selftest_prefs
+    try:
+        os.makedirs(_selftest_prefs, exist_ok=True)
+    except OSError:
+        pass
     prefs_before = prefs.all_prefs()
     prefs.clear(["cala-onboarded"])
     say("prefs before  : %s" % (prefs_before or "{}"))
@@ -1116,10 +1123,11 @@ def main(argv=None) -> int:
          "shot_scramble": "", "squish_move": {}, "squish": {}, "shot_squish": "",
          "glide_open": {}, "glide_1": {}, "glide_hover": {}, "glide_2": {},
          "glide_pick": {}, "glide_3": {}, "shot_glide": "",
+         "theme0": {}, "bg_a": {}, "bg_b": {}, "bg_c": {},
          "hub": {}, "star": {}, "star_closed": {}, "qq": {}, "qq_closed": {},
          "shot_star": "", "shot_qq": "", "url_gh": {},
          "clip_before": "", "clip_after": "", "clip_dry": {}, "clip_dry_bad": {},
-         "ls_move": {}, "ls_poke2": {}, "ls_read": {}, "shot_ls": "",
+         "ls_move": {}, "ls_poke2": {}, "ls_tries": 0, "ls_read": {}, "shot_ls": "",
          "join": {}, "join_bili": {}, "join_closed": {}, "shot_join": "", "url_ok": {},
          "url_bad": {}, "optlab": {},
          # round 6: the durable prefs store, the guide's second run, the geometry
@@ -1175,6 +1183,11 @@ def main(argv=None) -> int:
         #     is recorded with its spotlight geometry, so "the hole really is on
         #     the element it talks about" is a fact, not a guess.
         if R["probe"]:
+            # 0) the theme the page came up with, BEFORE anything in this run can
+            #    touch it -- printed so a "we did not start dark" surprise is
+            #    evidence instead of a mystery (the layer assertion below is
+            #    deliberately order-independent).
+            R["theme0"] = js(BG_JS) or {}
             time.sleep(0.8)
             R["ob0"] = js(ONBOARD_JS) or {}
             if not R["ob0"].get("open"):
@@ -1267,13 +1280,18 @@ def main(argv=None) -> int:
             R["glide_3"] = js(GLIDE_READ_JS) or {}
             js("window.__cala.setParams({fit:'cover'})")
 
-        # 2) the two background layers must be wired to bg_light / bg_dark
-        R["bg_dark"] = js(BG_JS) or {}
+        # 2) the two background layers must be wired to bg_light / bg_dark.
+        #    Read the state that is on, toggle, and assert the toggle really flipped
+        #    BOTH the theme attribute and the visible layer -- hardcoding "we start
+        #    dark" makes the check dependent on a remembered theme (and on whether
+        #    an earlier step in this very run happened to press the chip).
+        R["bg_a"] = js(BG_JS) or {}
         js("window.__cala && window.__cala.toggleTheme()")
-        time.sleep(1.0)                      # let the cross-fade settle
-        R["bg_light"] = js(BG_JS) or {}
+        time.sleep(1.1)                      # let the 620 ms cross-fade settle
+        R["bg_b"] = js(BG_JS) or {}
         js("window.__cala && window.__cala.toggleTheme()")
-        time.sleep(0.6)
+        time.sleep(1.1)
+        R["bg_c"] = js(BG_JS) or {}
 
         # 2b) the shell: layout at the widest and at the minimum size, and the
         #     native folder dialog really opening (we dismiss it with Esc)
@@ -1312,9 +1330,28 @@ def main(argv=None) -> int:
             # stale instant would be measuring the user's hand, not the widget.
             R["ls_move"] = js(LINESIDE_MOVE_JS) or {}
             time.sleep(0.4)
-            R["ls_poke2"] = js(LINESIDE_MOVE_JS) or {}
-            time.sleep(0.28)
-            R["ls_read"] = js(LINESIDE_READ_JS) or {}
+            # CP-35: the read is a bounded *settle loop*.  A single sample taken 0.28 s after the
+            # poke once measured eff=0.618 (the easing had not finished / a real pointermove had
+            # re-targeted the effect) and made the frozen-exe acceptance flaky even though the widget
+            # was fine.  The assertion stays just as strong (the settled value must still be > 0.75);
+            # the widget simply gets up to three chances and the BEST sample is reported, so a real
+            # regression still shows up as a failing number.
+            best, best_eff, tries = {}, -1.0, 0
+            for _i in range(3):
+                tries += 1
+                if _i == 0:
+                    R["ls_poke2"] = js(LINESIDE_MOVE_JS) or {}
+                else:
+                    R["ls_poke%d" % (_i + 2)] = js(LINESIDE_MOVE_JS) or {}
+                time.sleep(0.45)
+                got = js(LINESIDE_READ_JS) or {}
+                eff = ((got or {}).get("opt-force") or {}).get("eff") or 0
+                if eff > best_eff:
+                    best, best_eff = got, eff
+                if best_eff > 0.75:
+                    break
+            R["ls_tries"] = tries
+            R["ls_read"] = best
             R["shot_ls"] = _grab("ls")
 
             # the "Join us" hub + the two new entries (GitHub star popup, QQ group)
@@ -1527,15 +1564,16 @@ def main(argv=None) -> int:
         return 0
 
     ok = True
-    p, d, l, ui = R["probe"], R["bg_dark"], R["bg_light"], R["ui"]
+    p, ui = R["probe"], R["ui"]
     say("window loaded : %s" % ("yes" if R["loaded"].is_set() else "NO"))
     say("vue mounted   : %s" % ("yes" if p.get("hook") else "NO"))
     say("page->api     : %s" % (p.get("backend") or "<empty>"))
     say("token guard   : %s" % ("OK" if guard_ok else "FAIL"))
-    say("theme dark    : theme=%s light-layer=%s(%s) dark-layer=%s(%s)"
-          % (d.get("theme"), d.get("light"), d.get("lightImg"), d.get("dark"), d.get("darkImg")))
-    say("theme light   : theme=%s light-layer=%s(%s) dark-layer=%s(%s)"
-          % (l.get("theme"), l.get("light"), l.get("lightImg"), l.get("dark"), l.get("darkImg")))
+    for _tag, _st in (("at startup", R["theme0"]), ("at rest   ", R["bg_a"]),
+                      ("toggled   ", R["bg_b"]), ("toggled 2x", R["bg_c"])):
+        say("theme %s: theme=%-5s light-layer=%s(%s) dark-layer=%s(%s)"
+            % (_tag, _st.get("theme"), _st.get("light"), _st.get("lightImg"),
+               _st.get("dark"), _st.get("darkImg")))
     ob0, walk, obe = R["ob0"], R["ob_walk"], R["ob_end"]
     arts = [w.get("art") or "?" for w in walk]
     masked = [w for w in walk if w.get("mask")]
@@ -1759,12 +1797,35 @@ def main(argv=None) -> int:
     bad(R["loaded"].is_set(), "window did not load")
     bad(bool(p.get("hook")), "the Vue app did not mount (window.__cala missing)")
     bad((p.get("backend") or "").startswith("v"), "the page did not read /api/health")
-    bad(d.get("theme") == "dark" and d.get("light") == "0" and d.get("dark") == "1"
-        and d.get("lightImg") and d.get("darkImg"),
-        "the dark theme layers are wrong: %s" % d)
-    bad(l.get("theme") == "light" and l.get("light") == "1" and l.get("dark") == "0"
-        and l.get("lightImg") and l.get("darkImg"),
-        "the light theme layers are wrong: %s" % l)
+    def _op(st, k):
+        try:
+            return float(st.get(k))
+        except (TypeError, ValueError):
+            return -1.0
+
+    def _layers_ok(st, want):
+        """`want` theme must be the one visible: its layer ~1, the other ~0.
+
+        Opacities are compared with a tolerance instead of `== 1/0`: the layers
+        cross-fade over 620 ms and a sample taken during the fade is not a bug.
+        """
+        ok_light = _op(st, "light") >= 0.9 if want == "light" else _op(st, "light") <= 0.1
+        ok_dark = _op(st, "dark") >= 0.9 if want == "dark" else _op(st, "dark") <= 0.1
+        return (st.get("theme") == want and ok_light and ok_dark
+                and bool(st.get("lightImg")) and bool(st.get("darkImg")))
+
+    _start = (R["bg_a"] or {}).get("theme")
+    _flip = "light" if _start == "dark" else "dark"
+    bad(_start in ("dark", "light"),
+        "the theme attribute is neither dark nor light at rest: %s" % R["bg_a"])
+    bad(_layers_ok(R["bg_a"] or {}, _start),
+        "the %s layers are wrong at rest: %s" % (_start, R["bg_a"]))
+    bad(_layers_ok(R["bg_b"] or {}, _flip),
+        "toggling the theme did not switch to %s: %s" % (_flip, R["bg_b"]))
+    bad(_layers_ok(R["bg_c"] or {}, _start),
+        "toggling back did not restore %s: %s" % (_start, R["bg_c"]))
+    bad((R["theme0"] or {}).get("theme") in ("dark", "light"),
+        "the page came up without a theme on <html>: %s" % R["theme0"])
     # ---- the first-run guide (hello -> guide -> end) -------------------------
     bad(ob0.get("exists") is True, "window.__cala.onboard is missing: %s" % ob0)
     # the durable flag was cleared before the window existed: this IS a first run
@@ -2098,7 +2159,7 @@ def main(argv=None) -> int:
         bad(abs((sa.get("paneA") or 0) - (sa.get("paneB") or 0)) <= 40,
             "after the reset the two panes are not 50/50: %s" % sa)
         # ---- the ReactBits Line Sidebar ---------------------------------------
-        want = ["opt-fit", "opt-dryrun", "opt-combined", "opt-force", "opt-adv"]
+        want = ["opt-fit", "opt-dryrun", "opt-combined", "opt-force", "opt-noatlas", "opt-adv"]
         bad(lm.get("ids") == want,
             "the options are not a Line Sidebar list: %s" % lm.get("ids"))
         near = lr.get("opt-force") or {}

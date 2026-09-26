@@ -159,9 +159,22 @@ def build_material() -> dict:
     m["demo"] = d
 
     d = os.path.join(MAT, "bgonly")
-    make_png(os.path.join(d, "bg", "a.png"), 160, 90, 3)
-    make_png(os.path.join(d, "bg", "b.png"), 90, 160, 4)            # portrait -> contain bars
+    make_png(os.path.join(d, "bg", "a.png"), 160, 90, 3)              # 16:9 landscape
     m["bgonly"] = d
+
+    # aspect-ratio policy fixtures (user ruling 2026-09-25): landscape passes,
+    # square / portrait are refused unless -Fit contain was asked for.
+    d = os.path.join(MAT, "bgportrait")
+    make_png(os.path.join(d, "bg", "b.png"), 90, 160, 4)              # portrait -> contain bars
+    m["bgportrait"] = d
+
+    d = os.path.join(MAT, "bgwide")
+    make_png(os.path.join(d, "bg", "w.png"), 1233, 725, 5)            # wide, NOT 16:9 -> allowed
+    m["bgwide"] = d
+
+    d = os.path.join(MAT, "bgsquare")
+    make_png(os.path.join(d, "bg", "s.png"), 1024, 1024, 6)           # square -> refused
+    m["bgsquare"] = d
 
     d = os.path.join(MAT, "audioonly")
     make_wav(os.path.join(d, "Sound", "s1.wav"), 0.4)
@@ -266,8 +279,9 @@ SCENARIOS = [
          args=["-DryRun"], ok=True, gates=True, deployed=False, no_audio=True),
     dict(id="T4", name="audio only (no background)", srcm="audioonly", args=["-DryRun"],
          ok=True, gates=True, deployed=False),
-    dict(id="T5", name="contain fit letterboxes", srcm="bgonly",
-         args=["-DryRun", "-Fit", "contain"], ok=True, log_has="borders"),
+    dict(id="T5", name="contain fit letterboxes a portrait picture", srcm="bgportrait",
+         args=["-DryRun", "-Fit", "contain"], ok=True, log_has="borders",
+         post="letterbox_centred"),
     dict(id="T6", name="broken image fails at L1", srcm="badimg", args=["-DryRun"],
          ok=False, err_has="cannot decode image"),
     dict(id="T7", name="mp3 without ffmpeg gives the hint", srcm="mp3only",
@@ -302,7 +316,225 @@ SCENARIOS = [
     dict(id="T21", name="state survives a FAILED -Combined run", srcm="extra",
          args=["-DryRun", "-Combined"], pre="combined_after_failure", no_wipe=True,
          ok=True, gates=True, combined=True),
+    # ---- aspect-ratio policy (2026-09-25) -------------------------------------
+    dict(id="T22", name="1233x725 wide (not 16:9) is accepted", srcm="bgwide",
+         args=["-DryRun"], ok=True, gates=True, log_has="非 16:9 图片"),
+    dict(id="T23", name="square 1024x1024 is refused with the Chinese hint",
+         srcm="bgsquare", args=["-DryRun"], ok=False,
+         err_has="请自行裁剪或加黑边转换为 16:9"),
+    dict(id="T24", name="portrait 90x160 + cover is refused (contain is the escape)",
+         srcm="bgportrait", args=["-DryRun"], ok=False,
+         err_has="请自行裁剪或加黑边转换为 16:9"),
+    # ---- thumbnail channel: one preview MI per background (CP-34) -------------
+    dict(id="T25", name="one preview MI per background, DA row @30 -> it",
+         srcm="bgonly", args=["-DryRun"], ok=True, gates=True, post="mi_authored"),
+    dict(id="T26", name="-NoThumb keeps the v1 behaviour (no MI, inherited @30)",
+         srcm="bgonly", args=["-DryRun", "-NoThumb"], ok=True, gates=True, post="no_thumb"),
+    # ---- preview atlas: one cell per background on the game's own grid (CP-37) --------------
+    dict(id="T27", name="preview atlas: the background gets cell 165 @ (1260,1430)",
+         srcm="bgonly", args=["-DryRun"], ok=True, gates=True,
+         gates_extra=("A9", "A9b", "A10"), post="atlas_one_tile"),
+    dict(id="T28", name="-NoAtlas keeps the whole-image preview MI (CP-36 shape)",
+         srcm="bgonly", args=["-DryRun", "-NoAtlas"], ok=True, gates=True, post="no_atlas"),
+    # ---- -Combined on top of an already-appended table (CP-37b: the DA baseline bug) --------
+    dict(id="T29", name="-Combined adds backgrounds on top of a previous build",
+         srcm="threebg", seed="bgonly", args=["-DryRun", "-Combined"], ok=True, gates=True,
+         gates_extra=("A9", "A9b", "A10"), post="combined_adds"),
 ]
+
+
+def letterbox_centred(tag: str) -> str:
+    """Visual truth for `-Fit contain`: the picture must sit *centred* between
+    two equal (18,18,22) bars -- measured on the preview the build itself wrote.
+
+    Geometric assertions, not "the log mentioned borders":
+      * the first and last pixel of the middle scanline are the letterbox colour
+      * the left bar and the right bar have the same width (+-2 px)
+      * there IS a picture between them (the centre is not the letterbox colour)
+    BC1 quantises (18,18,22) to (16,16,16), hence the +-14 tolerance.
+    """
+    from PIL import Image
+    p = os.path.join(OUT, "verify", "b_preview.png")
+    check(os.path.isfile(p), "%s no preview written at %s" % (tag, p))
+    im = Image.open(p).convert("RGB")
+    w, h = im.size
+    y = h // 2
+    px = im.load()
+
+    def is_bar(x: int) -> bool:
+        r, g, b = px[x, y]
+        return abs(r - 18) <= 14 and abs(g - 18) <= 14 and abs(b - 22) <= 14
+
+    check(is_bar(0), "%s left border is not the letterbox colour: %s" % (tag, px[0, y]))
+    check(is_bar(w - 1), "%s right border is not the letterbox colour: %s" % (tag, px[w - 1, y]))
+    left = 0
+    while left < w and is_bar(left):
+        left += 1
+    right = w - 1
+    while right >= 0 and is_bar(right):
+        right -= 1
+    check(left > 0 and right < w - 1,
+          "%s there is no picture between the bars (left=%d right=%d)" % (tag, left, right))
+    lb, rb = left, w - 1 - right
+    check(abs(lb - rb) <= 2, "%s the picture is not centred: %d px left bar vs %d px right bar"
+          % (tag, lb, rb))
+    r, g, b = px[(left + right) // 2, y]
+    check(max(abs(r - 18), abs(g - 18), abs(b - 22)) > 30,
+          "%s the centre is still the letterbox colour %s -- nothing was pasted"
+          % (tag, (r, g, b)))
+    return " | letterbox centred (%d|%d px bars, picture %d px wide)" % (lb, rb, right - left + 1)
+
+
+def _report() -> dict:
+    p = os.path.join(OUT, "build_report.json")
+    check(os.path.isfile(p), "no build_report.json at %s" % p)
+    with open(p, encoding="utf-8") as f:
+        return json.load(f)
+
+
+def mi_authored(tag: str) -> str:
+    """Thumbnail channel truth: every new background row points its `@30` at an MI
+    of its own, that MI is packed, and its report entry says so.
+
+    The authoritative resolution (`@30` -> MaterialInstanceConstant named MI_x, and
+    that MI's SourceTexture -> our texture) is gate A8; this hook additionally
+    proves the *report/manifest* carries the MI identity, which is what
+    `-Combined` later re-uses.
+    """
+    rep = _report()
+    bgs = [m for m in rep["materials"] if m["kind"] == "bg"]
+    check(bgs, "%s the report has no background material" % tag)
+    for m in bgs:
+        check(m.get("mi_obj") == "MI_" + m["name"],
+              "%s mi_obj is %r, expected 'MI_%s'" % (tag, m.get("mi_obj"), m["name"]))
+        check((m.get("mi_pkg") or "").endswith("/" + m["mi_obj"]),
+              "%s mi_pkg is %r" % (tag, m.get("mi_pkg")))
+        check(int(m.get("mi_ref") or 0) < 0,
+              "%s mi_ref is %r (must be a negative FPackageIndex)" % (tag, m.get("mi_ref")))
+        check(int(m.get("mi_tex_ref") or 0) < 0,
+              "%s mi_tex_ref is %r (the MI must reference our texture)" % (tag, m.get("mi_tex_ref")))
+        for k in ("SpriteWidth", "SpriteHeight", "TextureWidth", "TextureHeight"):
+            check(k in (m.get("mi_scalars") or ""),
+                  "%s mi_scalars is %r, %s is missing" % (tag, m.get("mi_scalars"), k))
+        check((m.get("mi_legacy_rel") or "").endswith("/" + m["mi_obj"] + ".uasset"),
+              "%s mi_legacy_rel is %r" % (tag, m.get("mi_legacy_rel")))
+    check(rep["gates"]["A8"]["ok"], "%s gate A8 is not ok" % tag)
+    return " | %d preview MI (%s)" % (len(bgs), ", ".join(m["mi_obj"] for m in bgs))
+
+
+def no_thumb(tag: str) -> str:
+    """`-NoThumb` must reproduce exactly the v1 behaviour: no MI is authored, A8 is
+    skipped, and the ImportMap stays at its native size."""
+    rep = _report()
+    bgs = [m for m in rep["materials"] if m["kind"] == "bg"]
+    check(bgs, "%s the report has no background material" % tag)
+    for m in bgs:
+        check(not m.get("mi_obj"), "%s -NoThumb still authored %r" % (tag, m.get("mi_obj")))
+        check(not m.get("mi_ref"), "%s -NoThumb wrote mi_ref=%r" % (tag, m.get("mi_ref")))
+    check(rep["gates"]["A8"]["detail"].startswith("skipped"),
+          "%s A8 should be skipped with -NoThumb, it says %r" % (tag, rep["gates"]["A8"]["detail"]))
+    check("-NoThumb" in load_log(), "%s the log never mentions -NoThumb" % tag)
+    return " | %d bg row(s) inherited @30 (v1 behaviour)" % len(bgs)
+
+
+def atlas_one_tile(tag: str) -> str:
+    """CP-37: the background got its own cell on the game's preview grid.
+
+    Asserts the *numbers* (cell index, coordinates, block count, cell PSNR) and that A9/A9b/A10 all
+    passed - including the "mip0 changed = 0 native pixels" claim, which is what makes the atlas
+    append safe for the 165 native thumbnails.
+    """
+    rep = _report()
+    bgs = [m for m in rep["materials"] if m["kind"] == "bg"]
+    check(bgs, "%s the report has no background material" % tag)
+    check(len(bgs) == 1, "%s expected exactly 1 background, got %d" % (tag, len(bgs)))
+    m = bgs[0]
+    check(m.get("cell_index") == 165,
+          "%s cell_index is %r, expected 165 (the first free cell)" % (tag, m.get("cell_index")))
+    check(m.get("mi_tex_obj") == "T_BackgroundPreviews",
+          "%s mi_tex_obj is %r, expected the game's atlas" % (tag, m.get("mi_tex_obj")))
+    sc = m.get("mi_scalars") or ""
+    for k in ("SpriteX", "SpriteY", "SpriteWidth", "SpriteHeight", "TextureWidth", "TextureHeight"):
+        check(k in sc, "%s mi_scalars is %r, %s is missing" % (tag, sc, k))
+    at = rep.get("atlas") or {}
+    check(at, "%s the report has no atlas section" % tag)
+    cell = (at.get("cells") or [{}])[0]
+    check((cell.get("index"), cell.get("x"), cell.get("y")) == (165, 1260, 1430),
+          "%s atlas cell is %r, expected index 165 @ (1260,1430)" % (tag, cell))
+    check((at.get("blocks_changed") or 0) > 2000,
+          "%s only %r BC1 blocks changed" % (tag, at.get("blocks_changed")))
+    q = (at.get("quality") or [{}])[0]
+    check(float(q.get("psnr") or 0) >= 25.0,
+          "%s atlas cell PSNR is %r (the 25 dB gate)" % (tag, q.get("psnr")))
+    for g in ("A9", "A9b", "A10"):
+        gv = rep["gates"].get(g) or {}
+        check(gv.get("ok"), "%s gate %s not ok: %s" % (tag, g, gv.get("detail")))
+    check("changed=0" in (rep["gates"]["A9b"]["detail"] or ""),
+          "%s A9b does not report the mip0 zero: %s" % (tag, rep["gates"]["A9b"]["detail"]))
+    over = len((rep.get("ledger") or {}).get("override") or [])
+    check(over == len(rep.get("da_counts") or {}) + 1,
+          "%s ledger override count %d != %d DA tables + the atlas"
+          % (tag, over, len(rep.get("da_counts") or {})))
+    check(rep["params"].get("max_bg") == 59,
+          "%s the reported background cap is %r, expected the atlas' 59 free cells"
+          % (tag, rep["params"].get("max_bg")))
+    return " | cell 165 (1260,1430), %s blocks, cell PSNR %s dB, A9/A9b/A10 PASS" % (
+        at.get("blocks_changed"), q.get("psnr_db") or q.get("psnr"))
+
+
+def no_atlas(tag: str) -> str:
+    """`-NoAtlas` must reproduce the CP-36 shape: whole-image preview MI, no atlas override."""
+    rep = _report()
+    bgs = [m for m in rep["materials"] if m["kind"] == "bg"]
+    check(bgs, "%s the report has no background material" % tag)
+    for m in bgs:
+        check(int(m.get("cell_index") or -1) < 0,
+              "%s -NoAtlas still assigned cell %r" % (tag, m.get("cell_index")))
+        check(m.get("mi_tex_obj") not in ("", "T_BackgroundPreviews"),
+              "%s -NoAtlas mi_tex_obj is %r (it must stay on our own texture)"
+              % (tag, m.get("mi_tex_obj")))
+    check(rep.get("atlas") is None, "%s -NoAtlas still produced an atlas section" % tag)
+    for g in ("A9", "A9b", "A10"):
+        gv = rep["gates"].get(g) or {}
+        check(gv.get("ok"), "%s gate %s not ok: %s" % (tag, g, gv.get("detail")))
+        check((gv.get("detail") or "").startswith("skipped"),
+              "%s gate %s should be skipped with -NoAtlas, it says %r" % (tag, g, gv.get("detail")))
+    over = len((rep.get("ledger") or {}).get("override") or [])
+    check(over == len(rep.get("da_counts") or {}),
+          "%s ledger override count %d != %d DA tables (no atlas expected)"
+          % (tag, over, len(rep.get("da_counts") or {})))
+    check("-NoAtlas" in load_log(), "%s the log never mentions -NoAtlas" % tag)
+    return " | %d bg row(s), whole-image MI, no atlas override" % len(bgs)
+
+def combined_adds(tag: str) -> str:
+    """CP-37b: a `-Combined` run that ADDS backgrounds must append them onto the **native** table.
+
+    This is the case the old code got wrong (`bgref` re-serializing an already-appended DA grew its
+    uexp by one row while the row count stayed, so the L3 trailer gate refused).  Asserts that every
+    carried + new row is present, that the atlas grew, and that the three atlas gates passed.
+    """
+    rep = _report()
+    bgs = [m for m in rep["materials"] if m["kind"] == "bg"]
+    check(len(bgs) >= 2, "%s expected >= 2 backgrounds in this run, got %d" % (tag, len(bgs)))
+    counts = rep.get("da_counts") or {}
+    check(counts.get("DA_Backgrounds", 0) >= 165 + len(bgs),
+          "%s DA_Backgrounds has %r rows, expected >= 165 + %d (carried rows are re-appended too)"
+          % (tag, counts.get("DA_Backgrounds"), len(bgs)))
+    for m in bgs:
+        check(m.get("cell_index", -1) >= 165,
+              "%s %s got cell %r" % (tag, m["name"], m.get("cell_index")))
+    at = rep.get("atlas") or {}
+    check(at.get("cells"), "%s the report has no atlas cells" % tag)
+    for g in ("A9", "A9b", "A10"):
+        gv = rep["gates"].get(g) or {}
+        check(gv.get("ok"), "%s gate %s not ok: %s" % (tag, g, gv.get("detail")))
+    check("changed=0" in (rep["gates"]["A9b"]["detail"] or ""),
+          "%s A9b does not report the mip0 zero: %s" % (tag, rep["gates"]["A9b"]["detail"]))
+    over = len((rep.get("ledger") or {}).get("override") or [])
+    check(over == len(counts) + 1,
+          "%s ledger override count %d != %d DA tables + the atlas" % (tag, over, len(counts)))
+    return " | %d bg row(s) on top of the carried one, DA=%s, A9/A9b/A10 PASS" % (
+        len(bgs), counts.get("DA_Backgrounds"))
 
 
 def do_scenario(sc, cmd_prefix, state):
@@ -358,7 +590,8 @@ def _do_scenario(sc, cmd_prefix, state):
     if sc["ok"]:
         check(rc == 0, "%s exit code %d" % (tag, rc))
         if sc.get("gates"):
-            for g in ("A0", "A1", "A2", "A3", "A4", "A5", "A6"):
+            for g in ("A0", "A1", "A2", "A3", "A4", "A5", "A6", "A8") \
+                    + tuple(sc.get("gates_extra") or ()):
                 check(g in rep["gates"], "%s gate %s missing" % (tag, g))
                 check(rep["gates"][g]["ok"], "%s gate %s FAILED: %s"
                       % (tag, g, rep["gates"][g]["detail"]))
@@ -394,6 +627,18 @@ def _do_scenario(sc, cmd_prefix, state):
         check(KIT_DIR in load_log(), "%s the -Kit override path never appeared in the log" % tag)
 
     extra = ""
+    if sc.get("post") == "letterbox_centred":
+        extra += letterbox_centred(tag)
+    elif sc.get("post") == "mi_authored":
+        extra += mi_authored(tag)
+    elif sc.get("post") == "no_thumb":
+        extra += no_thumb(tag)
+    elif sc.get("post") == "atlas_one_tile":
+        extra += atlas_one_tile(tag)
+    elif sc.get("post") == "no_atlas":
+        extra += no_atlas(tag)
+    elif sc.get("post") == "combined_adds":
+        extra += combined_adds(tag)
     if sc.get("rollback"):
         snap_before = state["patch_before"]
         for ext in ("pak", "ucas", "utoc"):

@@ -132,6 +132,7 @@ def create_app() -> FastAPI:
             "dry_run": bool(body.get("dry_run")),
             "combined": bool(body.get("combined")),
             "force": bool(body.get("force")),
+            "no_atlas": bool(body.get("no_atlas")),
             "ffmpeg": body.get("ffmpeg") or None,
             "kit": body.get("kit") or None,
         }

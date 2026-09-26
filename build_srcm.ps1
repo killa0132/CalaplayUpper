@@ -13,6 +13,8 @@ param(
     [string]$Ffmpeg = "",
     [string]$Kit = "",
     [switch]$KeepWork,
+    [switch]$NoThumb,
+    [switch]$NoAtlas,
     [switch]$Quiet
 )
 
@@ -42,6 +44,8 @@ if ($Combined) { $argv += "-Combined" }
 if ($Ffmpeg)   { $argv += @("-Ffmpeg", $Ffmpeg) }
 if ($Kit)      { $argv += @("-Kit", $Kit) }
 if ($KeepWork) { $argv += "-KeepWork" }
+if ($NoThumb)  { $argv += "-NoThumb" }
+if ($NoAtlas)  { $argv += "-NoAtlas" }
 if ($Quiet)    { $argv += "-Quiet" }
 
 & $cmd @argv

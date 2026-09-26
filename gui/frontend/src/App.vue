@@ -58,6 +58,7 @@
         <OptionsPanel id="card-options" :class="{ busy: running }"
                       v-model:fit="form.fit" v-model:dry-run="form.dryRun"
                       v-model:combined="form.combined" v-model:force="form.force"
+                      v-model:noAtlas="form.noAtlas"
                       v-model:ffmpeg="form.ffmpeg" v-model:kit="form.kit" />
 
         <div class="runbar">
@@ -133,7 +134,7 @@ const theme = ref(document.documentElement.dataset.theme || 'dark')
 const version = ref('?')
 const form = reactive({
   paks: '', srcm: '', fit: 'cover',
-  dryRun: true, combined: false, force: false, ffmpeg: '', kit: ''
+  dryRun: true, combined: false, force: false, noAtlas: false, ffmpeg: '', kit: ''
 })
 const taskId = ref('')
 const running = ref(false)
@@ -216,6 +217,7 @@ async function run() {
     const r = await api.start({
       paks: form.paks.trim(), srcm: form.srcm.trim(), fit: form.fit,
       dry_run: form.dryRun, combined: form.combined, force: form.force,
+      no_atlas: form.noAtlas,
       ffmpeg: form.ffmpeg.trim(), kit: form.kit.trim()
     })
     taskId.value = r.task_id

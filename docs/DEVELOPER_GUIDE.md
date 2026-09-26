@@ -1,7 +1,7 @@
 > **这是开发者 / 参考文档。** 内容 = 原仓库根目录的 README.md 全文（2026-09-24 因首页改版移到 docs/）。
 > 面向使用者、下载与快速上手请回到 **[README](../README.md)** ｜ **[English](../README.en.md)**。
 >
-> 本文包含：CLI 开关与 30 秒上手、安全机制、A0~A7 判据、原理、体积、GUI 各轮迭代、开发与调试指南。
+> 本文包含：CLI 开关与 30 秒上手、安全机制、A0~A8 判据、原理、体积、GUI 各轮迭代、开发与调试指南。
 > 跨会话的开工规则与当前状态在 AGENTS.md。
 
 ---
@@ -35,7 +35,7 @@ Release 里，脚本党自取。
 
 ### 界面一览（点开看大图）
 
-| 主界面：左边填素材，右边实时日志 + A0~A7 判据 | 第一次打开会有 9 步新手引导 |
+| 主界面：左边填素材，右边实时日志 + A0~A8 判据 | 第一次打开会有 9 步新手引导 |
 |---|---|
 | [<img src="images/ui-layout.jpg" width="430">](images/ui-layout.jpg) | [<img src="images/guide.jpg" width="430">](images/guide.jpg) |
 
@@ -76,11 +76,11 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\build_srcm.ps1 `
 
 | 开关 | 含义 |
 |---|---|
-| `-Fit cover`（默认） | 等比放大填满 1920×1080 再居中裁边（二次元图裁边比留黑边好看） |
+| `-Fit cover`（默认） | 等比放大填满目标画布（v1.1.0 起 2560×1440）再居中裁边（二次元图裁边比留黑边好看） |
 | `-Fit contain` | 等比缩到能放下，四周补 `(18,18,22)` 黑边，一个像素都不重采样 |
 | `-DryRun` | 只跑 L0~L4（出容器 + 全判据），**绝不碰游戏目录** |
 | `-Combined` | 在上一次 `out_patch` 成果之上**累积**（不是每次从原生表重建）。累积状态就是 `out_patch\work\manifest.json` 加同目录的 legacy 树；**失败的运行不会把它吃掉**，且没有历史时会明确告诉你 `nothing to carry` |
-| `-Force` | 越过限额（bg ≤ 50 张、音频总时长 ≤ 10 min、PSNR ≥ 25 dB） |
+| `-Force` | 越过限额（bg ≤ 59 张、音频总时长 ≤ 10 min、PSNR ≥ 25 dB） |
 | `-Ffmpeg <exe>` | 手动指定 ffmpeg |
 | `-Kit <dir>` | 手动指定工具目录 |
 
@@ -102,23 +102,165 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\build_srcm.ps1 `
 
 ---
 
-## 3. 判据（A0~A7，全部带落盘证据）
+## 3. 判据（A0~A10，全部带落盘证据）
 
 | 门 | 内容 |
 |---|---|
-| A0 | UAssetAPI 写回保真：两个壳资产的 uasset/uexp 逐字节一致 |
+| A0 | UAssetAPI 写回保真：三个壳资产（贴图壳 / 音频壳 / **预览 MI 壳**）的 uasset/uexp 逐字节一致 |
 | A1 | CUE4Parse 能从**容器里**读出每个新资产，类型 = `USoundWave` |
 | A2 | `bStreaming=True` / `AudioFormat="PCM"` / `NumChunks=1` / 内联负载长度 == WAV 长度 |
 | A3 | cooked `USoundWave` 的 `NumChannels/SampleRate/Duration/TotalSamples` 与 WAV 一致 |
 | A4 | `tex-inspect --audio-out` 从容器解回来的 WAV 与规范化后的 WAV **逐字节一致** |
-| A5 | chunk id 台账：新包在原生容器 **0 命中**；与原生重合的只允许是故意覆盖的 DA（数目等于预期） |
-| A6 | 把交付容器**再解一遍**：四张 DA 行数正确 + 每个新资产 uexp 逐字节一致 |
+| A5 | chunk id 台账：新包（贴图 + **预览 MI**）在原生容器 **0 命中**；与原生重合的只允许是故意覆盖的（4 张 DA **+ 预览图集**，数目等于预期） |
+| A6 | 把交付容器**再解一遍**：四张 DA 行数正确 + 每个新资产（贴图 / 音频 / **MI**）uexp 逐字节一致 |
 | A7 | 从容器里取出四张 DA，把每条新行的 **key / 包名 / 资源名** 三个 FName 索引解析回字符串，逐个比对"我打算写进去的显示名与软路径"（**非 ASCII 显示名就是靠这道门保住的**；A6 只看行数和资产字节） |
+| A8 | **缩略图通道**（CP-34/CP-37）：容器里读回每条新背景行的 `@30`，必须解析成 `MaterialInstanceConstant` 且名字 = 我们的 `MI_<name>`；再用 `da-patch miprobe` 证明那个 MI 的 `SourceTexture` 指向预期贴图（图集形态下 = `T_BackgroundPreviews`）。`-NoThumb` 时显式 `skipped` |
+| A9 | **图集像素**（CP-37）：从交付容器读回图集，与基线（原生 / 上一轮）**逐 BC1 块**比对 ⇒ 差异块集合必须 ⊆ 我方格子覆盖的块集合；再用 CUE4Parse 独立读回 4096×2048 / `PF_DXT1` / 13 级、且**逐级 sha256 与我们所写一致** |
+| A9b | **原生缩略图不受影响**（CP-37）：逐级解码两版图集，统计**原生 165 格采样矩形内**的差异像素与最大通道差 —— **mip0 必须为 0**；mips ≥ 1 打印数字（P1 策略下 ≤1 块宽的接缝） |
+| A10 | **原生形态**（CP-37）：容器里读回我方 MI：`SourceTexture` 解析出对象名 == `T_BackgroundPreviews`，且 6 个标量 == `格子X/格子Y/250/141/4096/2048`（与游戏自带 MI 逐字段同形）。`-NoAtlas` 时显式 `skipped` |
 
 图像额外带 `QUALITY: PSNR=… MAE=… 清晰度比=…` 一行（低于 25 dB 直接报错，`-Force` 才放行），
 并在 `out_patch\verify\` 落 `*_preview.png` 供肉眼比对。
 
+### 3.1 背景缩略图 = 每个新背景一个独立 MI（CP-34）
+
+一条 `DA_Backgrounds` 行有**两条互不相干的引用通道**：
+
+```
+BackgroundMap 的 34 字节条目
+├─ +0   FName Key               显示名
+├─ +10  FSoftObjectPath 软路径  → /Game/CalaPlayer/Backgrounds/<名>   【大预览 + PLAY】读这里
+└─ +30  FPackageIndex 硬引用     → 一个预览 MI（UMaterialInstanceConstant）
+                                   └─ SourceTexture → 要显示的贴图     【下拉缩略图 + 侧边小预览】读这里
+```
+
+v1 让新行的 `@30` **原样继承克隆源**（= 某个原生 `MI_BackgroundPreview_NNN`，它指着共享图集
+`T_BackgroundPreviews` 的一格）⇒ 缩略图永远是原生那一格。CP-34 起：
+
+* **克隆源不硬编码**：L0 读 `DA_Backgrounds` 第 0 行的 `@30` → 在 DA 自己的 ImportMap 里解析出 MI
+  对象名与包路径 → 只解出那一个包（`retoc to-legacy -f` 是**子串**匹配，不能整目录拷）。
+* `da-patch mimk` 克隆它：**内部身份三处一起改**（`FolderName` + 名字表包路径 + export
+  ObjectName），在**它自己的 ImportMap 末尾**追加 `Package` + `Texture2D` 两条 import，
+  把 `TextureParameterValues` 重指到我们的贴图，写 `SpriteX/Y=0`、
+  `SpriteWidth/Height=TextureWidth/Height=` **目标画布尺寸**（v1.1.0 起 = 2560×1440，见 §3.3；
+  游戏自带的 MI 只有这 6 个标量，**没有作者截图里的
+  `isSelected`** —— 缺席的参数会被点名报出来，不硬塞）。
+* `da-patch bgref` 在 **DA 的 ImportMap 末尾**追加 `Package` + `MaterialInstanceConstant` 两条
+  import，python 把它返回的 `FPackageIndex` 写进**这一行**的 `@30`（每行不同）。
+* **只追加不重排**由 `assert_name_import_append_only()` 证明：比较 `probe`（名字表）与
+  `imports`（ImportMap）的**语义转储** —— 老名字/老 import 的索引与内容必须逐条不变，只在末尾长出来。
+  ⚠️ **不能拿字节 diff 当判据**：UAssetAPI 会把整个 uasset 重新序列化。
+* 万一真机出事，`-NoThumb`（CLI / `build_srcm.ps1` / GUI `no_thumb`）回到 v1 行为：
+  不造 MI、`@30` 继承克隆源、A8 `skipped`。
+
+### 3.2 宽高比约束（防变形，CP-34）
+
+游戏用**固定 sprite**采样背景（`MMI_BackgroundSelector` 把 `SpriteWidth/Height`
+烘死），社区实测：非宽屏素材进游戏会被**拉伸**。所以 L0 扫描阶段就按宽高比分流：
+
+| 形状 | 默认（`-Fit cover`） | `-Fit contain` |
+|---|---|---|
+| 宽 > 高（含 1233×725、3440×1440 等非 16:9 宽屏） | 放行，日志给 `WARN: 非 16:9 图片 …` | 放行，居中补 `(18,18,22)` 黑边 |
+| 正方形（`\|w-h\| ≤ max(2, 2%·h)`） | **拒绝**（中文提示） | 强制 contain，放行 |
+| 竖屏（w < h） | **拒绝**（中文提示） | 强制 contain，放行 |
+
+打不开的图**不在 L0 报错**（留给 L1 的 `cannot decode image`，判据不变）。`-Fit contain` 的
+几何正确性由回归 T5 在 build 自己写出的 `verify/b_preview.png` 上**量**出来（中线首末像素 =
+黑边色、左右黑边等宽 ±2 px、中间确实有画面），不是"日志里出现了 borders"。
+
+### 3.3 背景目标画布与 `uexp` 整块重建（路线 B，v1.1.0）
+
+**目标画布 = `config.TARGET_W/TARGET_H`（2560×1440），格式仍是 `PF_DXT1`。** 2560×1440 的源图
+**不再缩放**（实测 PSNR 35.54 → **36.75 dB**、41.13 → **41.71 dB**），更小的图按 cover/contain
+适配到该画布；`MI_<名字>` 的 6 个精灵标量由这两个常量派生，**自动同步**。
+
+cooked `Texture2D` 的尺寸是写在自包含 `.uexp` 里的，所以换尺寸必须**整块重建**（不是补丁式改几个
+字节）。实测布局（`T_Evni_Background_01_O`，1920×1080，1,383,410 B）：
+
+```
+[header 110 B] [mip0][16 B] [mip1][16 B] ... [mip10][16 B] [8 B 零][PACKAGE_FILE_TAG]
+```
+
+| 位置 | 含义 |
+|---|---|
+| `@0` | `FStripDataFlags`（`04 05`） |
+| `@2` / `@6` | `SizeX` / `SizeY` ← 改 |
+| `@10` | 16 B 键：**语义未确认**（8 种 MD5/SHA1 候选全部不匹配）⇒ **原样保留** |
+| `@50` | `DataSize` = `len(uexp) - 62` ← 改 |
+| `@74` / `@78` | `SizeX` / `SizeY` 第二处 ← 改 |
+| `@82` | `SizeZ` = 1 |
+| `@86` | `PF_DXT1` 的 FString（换格式才动） |
+| `@102` | `MipCount` ← 改（2560×1440 ⇒ **12**） |
+| 每级 mip 的 16 B 记录 | `u32 SizeX, u32 SizeY, u32 SizeZ(=1), u32 (i+1)`，**最后一级记 0** |
+
+尺寸链用**移位**规则 `max(1, W>>i)`（壳的第 4 级是 **120×67**、第 6 级 **30×16**，不是 ceil 半宽），
+每级负载 = `ceil(X/4)·ceil(Y/4)·8` B。2560×1440 ⇒ 负载合计 2,457,960 B，重建后 uexp = **2,458,274 B**。
+
+**每级 mip 的真实结构**（这一点曾把我误导很久，按 CUE4Parse 的读法才是对的）：
+
+```
+FTexture2DMipMap = [FByteBulkData][int32 SizeX][int32 SizeY][int32 SizeZ]
+FByteBulkData(inline, legacy) = [u32 BulkDataMap 索引][payload]
+```
+
+⇒ 文件里看到的是"**payload 后面跟 16 B**"，其实是 **该 mip 的 3 个 dim** + **下一个 mip 的 4 B 索引**；
+最后一级后面那 4 B（值为 0）是尾部的哨兵。索引值 = `BulkDataMap` 里的下标（0,1,2,…），
+**不是** i+1（早先的误读）。逐字节回环门把这个结构钉死了。
+
+**uasset 侧有三个尺寸耦合字段，必须一起改**：
+
+| 字段 | 说明 |
+|---|---|
+| `SerialSize`（8 B） | `= len(uexp) - 4`，该模式在 uasset 里**唯一命中** |
+| `BulkDataMap` 记录表 | `retoc to-legacy` 把 Zen 的 bulk 表搬到了 uasset 尾部：每条 **44 B** = `u64 SerialOffset, i64 CookedIndex(-1), u64 SerialSize, u32 ElementCount(=size), 2×u32 pad, u32 Flags(0x48 = SingleUse\|ForceInlinePayload), u32 pad`，**每级 mip 一条** |
+| 记录表**前面的计数**（u32，位于 `start-8`） | 表里有多少条记录 |
+
+⚠️ **最坑的一处**：只改记录表、不改计数，CUE4Parse 会读成"11 条正确 + 第 12 条垃圾" ——
+`BulkDataFlags` 变成 `PayloadAtEndOfFile|SerializeCompressed`、`byte[0]`、`SizeY/SizeZ=0`，
+而**所有字节级判据（A0/A6 的哈希与字节比对）依然全绿**（因为文件确实是我们写的那些字节）。
+所以 A6 现在额外做一件事：**用 CUE4Parse 把重建后的贴图读回来**，要求
+`2560x1440 / PF_DXT1 / 12 级 / 每级 sha256 == 编码器输出`（这条判据是在 `-DryRun` 阶段就能拦住的）。
+
+复现用的只读工具：`work/cp35_uexp_layout.py`（解 header）、`work/cp35_uexp_walk.py`（走结构）、
+`work/cp35_hash_guess.py`（试 `@10` 是不是载荷哈希）、上游 `work/cp35_routeb_check.py`（回环门）。
+
 ---
+
+### 3.4 预览图集：把我们的缩略图放进游戏自己的格子（CP-37，当前形态）
+
+**为什么需要它**：`@30` 那个 MI 是**三个消费者共用**的唯一通道（只读活进程实测，2026-09-26）：
+
+| 显示的三个地方 | 谁在建材质 | 它从 `@30` 拿到什么 |
+|---|---|---|
+| 下拉选择器里的缩略图（chip） | 游戏建一个 **MID，父对象就是 `@30` 那个 MI** | **整份材质**（`SourceTexture` + 7 个标量） |
+| 编辑器右侧 Background 预览块 | 游戏建 MID，父 = `MMI_BackgroundPreview` | **只有 `SpriteX/SpriteY`** |
+| 底部时间轴单元格 | 游戏建 MID，父 = `MMI_SubslotContentBackground`（每次选择新建） | **只有 `SpriteX/SpriteY/0`** |
+
+后两处的材质**自己不传贴图**（`TextureParameterValues` 为空，父材质默认 = 图集）
+⇒ 静态补丁下它们**只能显示图集里的某一格**，而"显示哪一格"完全由 `@30` 的两个坐标决定；
+chip 作为那个 MI 的 MID，也跟着换成图集格子。所以：
+
+* **格子位置 = 游戏自己的网格**：`列 = i % 16`、`行 = ⌊i / 16⌋`、坐标 `= (列×252, 行×143)`，
+  格子 `250×141`、步长 `252×143`（2 px 间隔）。游戏自带 165 格（第 0~9 行整行 + 第 10 行前 5 格）
+  ⇒ 我们可用 **序号 165..223 共 59 格**（`MAX_BG = 59` 就是这个数）。
+* **MI 形态改成原生形态**：`SourceTexture` 保持壳自己的图集（`mimk` 传 `- -` ⇒ **不追加任何
+  import**），只写 `SpriteX/SpriteY`（语义上就两个 float）+ `250/141/4096/2048`。
+* **像素是等长原地替换**：只改图集 `.uexp` 里"我方格子覆盖的 BC1 块"，**uasset 一个字节都不动**
+  （所以不需要路线 B 那套 `SerialSize` / `Zen BulkDataMap` 手术）。图集定位用**文件长度方程 +
+  每级 16 B 记录链自证**（不依赖 `HEADER_LEN`，因此"上一轮的图集"也能当基线 ⇒ `-Combined` 可行）。
+* **P1 共块策略**（用户拍板）：mip0 里我方格子的块边界正好落在 2 px 间隔上 ⇒
+  **原生 165 格的 mip0 逐字节不变（A9b 断言 0）**；mips ≥ 1 坐标不再 4 对齐，序号 165..175 /
+  176..180 这 16 格会与原生邻居共 1 块宽 ⇒ 那些块用"原始解码像素 + 我方矩形内像素"重组再编码，
+  代价 = 邻格边缘 ≤1 像素的重编码误差（实测最大通道差 42，A9b 每次构建报数）。
+* **chip 不会因此变糊**：chip 的实测显示尺寸 = **146×82**（真机 NCC 实测；设计值 163×92，
+  `WBP_CharacterListItem.Spacer_94.Size`），图集格子 250×141 比它还大 2.9 倍面积。
+  ⚠️ **但 2026-09-26 真机 A12 测出来 chip 变软约 30%**（Laplacian 1715 → 1196、
+  `PSNR(before,after)=26.4 dB`）：格子只有 250 texel 宽而 chip 显示 146 px ⇒ 足迹 1.7 texel/px
+  ⇒ **GPU 取 LOD≈0.5，渲染的是 mip0(250) 与 mip1(125) 各半的混合**；2K 路径的足迹是 17.5 texel/px
+  ⇒ LOD≈4.1 ⇒ 主要由 mip4(160 ≈ 1:1) 出图。⇒ 结论要写成"**内容相同、观感略软**"，
+  这条是"面积够大 ≠ 不掉画质"的实例（三重线性的分数 LOD 会偏向更粗的 mip）。
+* `-NoAtlas` = 回到 CP-36 的整图形态（`SourceTexture` = 我们的 2K 贴图，chip 吃 2K，
+  另两处显示图集第 0 格）；`-NoThumb` = v1（不造 MI）。
 
 ## 4. 原理（为什么这样做）
 
@@ -127,7 +269,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\build_srcm.ps1 `
   同名容器互斥，所以 `install.ps1` / `uninstall.ps1` 必须成对。
 * **背景**：克隆原生 1920×1080 `PF_DXT1` 壳 → `da-patch namerepl` **同时**改
   `FolderName` + 名字表包路径 + export ObjectName（只改文件名会被容器注册成旧包 id）
-  → 用自研（已修 bug）BC1 编码器同长替换 11 级 mip 负载。
+  → 用自研（已修 bug）BC1 编码器编码到**目标画布**（v1.1.0 起 2560×1440 / 12 级）
+  → **整块重建 `.uexp`** 并修 uasset 的 `SerialSize`（见 §3.3）。
 * **音频**：克隆最小 BINKA 壳 → 保持**流式**路径 + `AudioFormat` 换成 `"PCM"`
   + **单 chunk 内联**，负载 = **整个 RIFF/WAVE 文件原封不动**；
   再修 legacy uasset 尾部 Zen `BulkDataMap` 的 `SerialSize`（不修的话引擎按陈旧长度读负载）。
@@ -135,8 +278,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\build_srcm.ps1 `
   调 `FWaveModInfo::ReadWaveInfo` 解析 RIFF。
 * **MP3**：**运行期没有 MP3 解码器**（exe 里的 MP3 字符串属于 Media/Electra 插件与编辑器导入器），
   所以一律先转成 PCM WAV（`-ar 48000 -ac 2 -c:a pcm_s16le`）。
-* **DA 追加**：背景表每行 34 B（`+30` 是**硬引用**指向该行预览材质，**必须原样继承克隆源**，
-  它只是"看起来"等于 `-(行号+2)`；当成不变式去重算会让引擎 `HandleBadImportIndex()` Fatal）；
+* **DA 追加**：背景表每行 34 B（`+30` 是**硬引用**指向该行预览材质 —— v1 原样继承克隆源，
+  CP-34 起指向我们自己造的 `MI_<name>`，见 §3.1；**永远不要**把"看起来等于 `-(行号+2)`"当成
+  不变式去重算，那会让引擎 `HandleBadImportIndex()` Fatal）；
   音频三表每行 28 B，走 `da-patch sndmap`（反射调用 `TMap.Add`）。
 
 ---
@@ -144,7 +288,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\build_srcm.ps1 `
 ## 5. 项目结构（每个目录是干什么的）
 
 ```
-core/            打包管线 —— 唯一的"引擎"。L0~L5 编排、A0~A7 判据、DA 只追加、
+core/            打包管线 —— 唯一的"引擎"。L0~L5 编排、A0~A8 判据、DA 只追加、
                  BC1 编码、WAV 规范化、kit/ffmpeg 探测、日志与报告。
                  ⛔ 不可改：改这里就是改工具本身的行为。
 cli/             命令行入口（argparse 一层薄壳，只做参数解析后调用 core）。
@@ -172,7 +316,7 @@ kit/             self-contained 工具集：retoc / da-patch / tex-inspect /
 tools-src/       da-patch 与 tex-inspect 的 C# 源码（可用 dotnet publish 重新发布）
 python/          项目私有 venv（numpy / pillow / pyinstaller / pywebview / fastapi）
 tests/           回归与沙箱：
-  regression.py      21 场景 CLI 回归（出厂 exe + fakegame 沙箱 + 真机目录守护）
+  regression.py      29 场景 CLI 回归（出厂 exe + fakegame 沙箱 + 真机目录守护）
   run_regression.ps1 包装脚本
   gui_api_check.py   GUI 接口端到端（G1）
   gui_exe_check.py   冻结 GUI exe 的三项检查（G4）
@@ -214,7 +358,7 @@ README.en.md     英文版 README（顶部与中文版互链）
 | 「背景适配」下拉（ReactBits Glide Select 的 Vue 移植） | `gui/frontend/src/components/GlideSelect.vue` |
 | 切换语言时的乱码解码波纹 | `gui/frontend/src/components/ScrambleText.vue` |
 | 实时日志面板 | `gui/frontend/src/components/LogView.vue` |
-| A0~A7 判据面板（含 BorderGlow 光晕） | `gui/frontend/src/components/ResultPanel.vue` |
+| A0~A8 判据面板（含 BorderGlow 光晕） | `gui/frontend/src/components/ResultPanel.vue` |
 | 可拖拽分隔条 | `gui/frontend/src/components/SplitPane.vue` |
 | 底部进度条 | `gui/frontend/src/components/ProgressBar.vue` |
 | 成功/失败弹窗 | `gui/frontend/src/components/StatusModal.vue` |
@@ -299,7 +443,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\build_gui.ps1    # GUI 那
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\run_regression.ps1
-#   → 21 个场景，约 3 分钟，全部走"出厂 exe + 沙箱游戏目录 + 真游戏目录守护"
+#   → 26 个场景，约 4 分钟，全部走"出厂 exe + 沙箱游戏目录 + 真游戏目录守护"
 #   --only T1 T6                 只跑指定场景
 #   --list                       列出场景
 #   --exe <exe>                  换被测 exe（例如全量版）
@@ -309,10 +453,10 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\run_regression.ps1
 
 | 场景 | 断言 |
 |---|---|
-| T1 全量 dry-run | A0~A7 全 PASS、`deployed=false` |
+| T1 全量 dry-run | A0~A8 全 PASS、`deployed=false` |
 | T2 部署 + 读回 + 回滚 | 部署的容器哈希 == 构建产物；`uninstall.ps1` 后沙箱回到部署前 |
 | T3 只有背景 / T4 只有音频 | 另一类判据显示 `skipped`，不假通过 |
-| T5 `-Fit contain` | 日志里出现 `borders` |
+| T5 `-Fit contain`（90×160 竖图） | 在 build 自己写出的 `verify\b_preview.png` 上量几何：中线首末像素 = 黑边色、左右黑边等宽 ±2px、中间确实有画面（实测 `328\|328 px bars`） |
 | T6 坏图 / T12 空素材夹 | 非 0 退出 + 指定报错文案 |
 | T7 MP3 但无 ffmpeg | 非 0 退出 + ffmpeg 中文指引 |
 | T8 超 bg 限额 / T10 PSNR 门 | 非 0 退出（限额 / 画质各自命中） |
@@ -325,7 +469,15 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\run_regression.ps1
 | T18 / T19 | 有 ffmpeg 时 MP3 **确实被转码**；`-Ffmpeg <path>` 指定路径也生效 |
 | T20 `-Combined` 但没有历史 | 明确提示 `nothing to carry`，容器只装本次 srcm |
 | T21 一次失败的 `-Combined` 之后 | 上一轮的累积状态**没被吃掉**，下一次 `-Combined` 仍能带上 |
+| T22 1233×725（宽但不 16:9） | 打包成功，日志出现 `非 16:9 图片` 警告 |
+| T23 1024×1024 正方形 | 非 0 退出 + 中文提示 `请自行裁剪或加黑边转换为 16:9` |
+| T24 90×160 竖图 + 默认 cover | 同上（**`-Fit contain` 才是逃逸口**） |
+| T25 缩略图通道 | 报告里每个 bg 都有 `mi_obj/mi_pkg/mi_ref/mi_tex_ref/mi_scalars`，A8 PASS |
+| T26 `-NoThumb` | 不造 MI、`mi_ref` 为空、A8 显式 `skipped`（v1 行为） |
 | 全程 | 原生 5 容器哈希不变；**真实游戏目录**不被改动 |
+
+> T16/T17 是条件场景：极简 Kit 里没有 ffmpeg，所以它们会被 `SKIP`。要覆盖它们就显式补跑
+> （`--kit <full kit>\kit` 跑 T17、`--exe <full kit>\CalaPlayerSrcmBuilder.exe` 跑 T15/T16）。
 
 > 另外做过一次**对着真实游戏目录的只读 dry-run**（`-Paks D:\CalabiyanGalgameMaker\CalaPlayer -DryRun`）：
 > 13.5 s、A0~A7 全 PASS、真实目录 8 个文件哈希**逐个未变**（含已装的 audio3 `_P`）——
@@ -580,7 +732,7 @@ kit / ffmpeg 探测都是 exe / `_MEIPASS` 路径，与 CWD 无关），`build_g
      切到英文后断言**每一项都变了**且英文里不含 CJK，再切回中文断言中文文案复原。
 
 2. **引导补两步**（把每个控件都覆盖到）：
-   * **-Force**：「当素材超过默认限额（bg > 50 张 或 音频 > 10 分钟）或画质 PSNR 低于 25 dB 时，
+   * **-Force**：「当素材超过默认限额（bg > 59 张 或 音频 > 10 分钟）或画质 PSNR 低于 25 dB 时，
      需要勾选 -Force 才能继续打包」——它是"我知道我在干什么"的确认，不是加速开关。
    * **进阶**：「这里可以手动指定 ffmpeg 路径、自定义工具目录，以及查看更详细的构建参数」。
 
@@ -746,12 +898,32 @@ kit / ffmpeg 探测都是 exe / `_MEIPASS` 路径，与 CWD 无关），`build_g
      `chips/taskid 右缘 == 栏右缘`、**大窗口的面板宽度必须比标准窗口大 20px 以上**（"真的会随窗口适配"），
      以及最小窗口下 `选项行标签既不折行也不被截断`（`trunc=0/5`）。
 
-## 11. 已知边界（v1 明确接受）
-* 编辑器里**新增背景的缩略图**仍显示原生那一格（缩略图走 `@30`→MI→共享图集
-  `T_BackgroundPreviews`，静态补丁改不到）；**大预览与 PLAY 正确**。这是你拍板接受的 v1 行为。
+## 11. 已知边界（明确接受 / 待修）
+
+* ⚠️ **时间轴单元格 + 编辑器右侧 Background 预览块不显示新增背景**（2026-09-26 定案）。
+  原因是**游戏原生蓝图不响应**这两个位置——**连游戏自带的背景也不显示在上面**（只读活进程探针 C1 定案）。
+  不受影响：下拉缩略图（CP-34 已修好）、主菜单章节封面、游戏画面里的背景本体。
+  运行时补救方案（R2）已废弃（严重卡顿 + 重启失效 + 作者确认原语不对），
+  现行路线 = **静态追加预览图集 `T_BackgroundPreviews`**，只读评估见
+  [`CP35_ATLAS_APPEND_ASSESSMENT.md`](CP35_ATLAS_APPEND_ASSESSMENT.md)。
+* ⚠️ **`-Combined` 目前在"再加一张背景"时不可用**（2026-09-26 实测，**待修**）：
+  `-Combined` 会把上一轮**已经追加过行**的 `DA_Backgrounds` 当基线，而 `da-patch bgref`/`addname`
+  走 UAssetAPI 重新序列化整包，在这个基线上会让 **uexp 多出 34 B（一整行）而行计数不变**
+  ⇒ L3 的 trailer 门直接拒绝（`DA_Backgrounds trailer check failed`）。
+  **失败是安全的**（碰任何文件前就停、游戏目录零写入、上一轮累积状态自动还原），但功能不可用。
+  实测对照：原生 DA(165 行) 上两者都 **+0 B**；已追加 DA(166 行) 上两者都 **+34 B**。
+  29 场景没抓到，是因为唯一覆盖 `-Combined` 的 T13 第二次跑用的是**只有音频**的夹具
+  （`srcm="extra"` 只有 `Ambient\extra.wav`）⇒ `DA_Backgrounds` 那一支 `rows=[]`、从不调 `bgref`。
+  绕行（已验证）：换一个**新的 out_patch** 做全新构建，srcm 里把上一轮素材按**同名文件**再放一遍。
+  建议修法（架构级，先出方案再动手）：`-Combined` 时 DA 基线改用**原生 DA**，
+  carried 行 + 新行统一走字节级 `append_bg_rows`。
+  **2026-09-26 用户拍板：先记账、不修**，等图集路线定了再一起处理。
+* **背景数量上限：拍板取 48（尚未实现，代码里现在仍是 50）** —— 2026-09-26 为图集追加方案的
+  块对齐硬上限（48 格）预留：将来默认上限取 48，只有显式 `-Force` 才允许突破到 50，
+  并且要**警告缩略图可能不显示**。改这一条要连 `core/config.py` 的上限与回归里的上限用例一起改。
 * PCM 不压缩：48 kHz 立体声 ≈ 11.5 MB/分钟，单声道 ≈ 5.8 MB/分钟。
 * 不含 OGG/Vorbis 压缩路线（引擎有 `VorbisAudioDecoder`，属后续可探索项）。
-* 不含"替换原生条目"（v1 只追加）。
+* 不含"替换原生条目"（只追加）。
 
 ---
 
@@ -820,7 +992,7 @@ python gui\desktop.py --selftest --selftest-ui --selftest-shell
 # 2) 接口层（G1）：令牌 403 / SSE / 与 CLI 判据逐项一致 / 真部署 + 回滚 / 取消
 python tests\gui_api_check.py
 
-# 3) CLI 21 场景回归（约 3 分钟，出厂 exe + fakegame 沙箱 + 真机目录守护）
+# 3) CLI 29 场景回归（约 4 分钟，出厂 exe + fakegame 沙箱 + 真机目录守护）
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\run_regression.ps1
 
 # 4) 重打交付件 + 验冻结 exe（G4：双击 / 无控制台启动 / 冻结自检）

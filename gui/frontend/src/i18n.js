@@ -65,7 +65,9 @@ export const DICT = {
     'opts.combined': '-Combined',
     'opts.combinedHint': '在上一次 out_patch 成果之上累积',
     'opts.force': '-Force',
-    'opts.forceHint': '越过限额（bg ≤ 50、音频 ≤ 10 min、PSNR ≥ 25 dB）',
+    'opts.forceHint': '越过限额（bg ≤ 59、音频 ≤ 10 min、PSNR ≥ 25 dB）',
+    'opts.noAtlas': '-NoAtlas',
+    'opts.noAtlasHint': '不做图集追加（回到旧行为：下拉缩略图更锐，但时间轴与右侧预览块不显示你的图）',
     'opts.adv': '进阶（ffmpeg / 工具目录）',
     'opts.advHint': '手动指定 ffmpeg 路径、自定义工具目录，以及更细的构建参数',
     'opts.ffmpegPh': '留空 = 自动探测',
@@ -132,7 +134,7 @@ export const DICT = {
       + '<b>-Combined</b> 用来在上一轮成果上继续累积（不会把上次的内容弄丢）。',
     'ob.forceKicker': '第 3 步 · 装不下的时候',
     'ob.forceTitle': '-Force 是越过限额的那把钥匙',
-    'ob.forceText': '当素材超过默认限额（<b>bg &gt; 50 张</b> 或 <b>音频 &gt; 10 分钟</b>），'
+    'ob.forceText': '当素材超过默认限额（<b>bg &gt; 59 张</b> 或 <b>音频 &gt; 10 分钟</b>），'
       + '或者画质 <b>PSNR 低于 25 dB</b> 时，工具会主动停下并告诉你原因。<br>'
       + '这时勾上 <b>-Force</b> 才能继续打包。<br>'
       + '它不是"加速开关"，是"我知道我在干什么"的确认 —— 超限只是被拦，不是坏掉了。',
@@ -237,7 +239,9 @@ export const DICT = {
     'opts.combined': '-Combined',
     'opts.combinedHint': 'accumulate on top of the previous out_patch build',
     'opts.force': '-Force',
-    'opts.forceHint': 'override the limits (bg ≤ 50, audio ≤ 10 min, PSNR ≥ 25 dB)',
+    'opts.forceHint': 'override the limits (bg ≤ 59, audio ≤ 10 min, PSNR ≥ 25 dB)',
+    'opts.noAtlas': '-NoAtlas',
+    'opts.noAtlasHint': 'skip the preview-atlas append (old behaviour: sharper dropdown thumbnail, but the timeline cell and the right preview block will not show your picture)',
     'opts.adv': 'Advanced (ffmpeg / kit folder)',
     'opts.advHint': 'set an explicit ffmpeg path, point at your own kit folder, and see the finer build switches',
     'opts.ffmpegPh': 'empty = auto-detect',
@@ -304,7 +308,7 @@ export const DICT = {
       + '<b>-Combined</b> keeps accumulating on top of the previous build instead of throwing it away.',
     'ob.forceKicker': 'Step 3 · when it does not fit',
     'ob.forceTitle': '-Force is the key past the limits',
-    'ob.forceText': 'When the material exceeds the defaults (<b>bg &gt; 50</b> or <b>audio &gt; 10 min</b>), '
+    'ob.forceText': 'When the material exceeds the defaults (<b>bg &gt; 59</b> or <b>audio &gt; 10 min</b>), '
       + 'or the picture quality lands under <b>25 dB PSNR</b>, the tool stops and tells you why.<br>'
       + 'Tick <b>-Force</b> to go ahead anyway.<br>'
       + 'It is not a “go faster” switch, it is a “I know what I am doing” confirmation — being stopped is a limit, not a failure.',

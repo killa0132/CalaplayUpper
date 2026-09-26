@@ -175,11 +175,99 @@ class BgRow:
     key: str          # display name (may be non-ASCII)
     pkg: str
     obj: str
+    mi_obj: str = ""  # object name of this row's preview MI (CP-34)
+    mi_pkg: str = ""
+    mi_ref: int = 0   # FPackageIndex written into @30 (negative = import)
+
+
+# --------------------------------------------------------------------------
+# ImportMap surgery (CP-34): the DA row's @30 hard reference
+# --------------------------------------------------------------------------
+NAME_RE = re.compile(r"^\s*name\[(\d+)\] = (.*)$")
+BGREF_RE = re.compile(r"BGREF_OK ref=(-?\d+) imports=(\d+)->(\d+)")
+
+
+def probe_names(kit: Kit, uasset: str, log: Log, stage: str = "L3") -> List[str]:
+    r = kit.da(["probe", uasset, kit.usmap], log, stage)
+    if not r.ok:
+        raise BuildError(stage, "da-patch probe failed on %s" % uasset, r.tail())
+    out: List[str] = []
+    for line in r.out.splitlines():
+        m = NAME_RE.match(line)
+        if m:
+            out.append(m.group(2))
+    if not out:
+        raise BuildError(stage, "could not read the name table of %s" % uasset, r.tail())
+    return out
+
+
+def assert_name_import_append_only(kit: Kit, before_ua: str, after_ua: str, label: str,
+                                   log: Log, stage: str = "L3") -> None:
+    """Append-only proof at the *semantic* level.
+
+    UAssetAPI re-serialises the whole package, so a byte diff proves nothing here.
+    What must hold is: every pre-existing name keeps its index, and every
+    pre-existing import entry keeps its index *and its content*.  A reordered
+    ImportMap silently changes the meaning of every negative FPackageIndex in the
+    uexp (that is how a fabricated `@30` Fatal-crashed the game once).
+    """
+    nb = probe_names(kit, before_ua, log, stage)
+    na = probe_names(kit, after_ua, log, stage)
+    if na[:len(nb)] != nb:
+        bad = [i for i in range(len(nb)) if i >= len(na) or na[i] != nb[i]]
+        raise BuildError(stage, "%s: existing name entries moved/changed (first bad index %s)"
+                         % (label, bad[:8]), "the old %d names must keep their indices" % len(nb))
+    ib = parse_imports(kit.da(["imports", before_ua, kit.usmap], log, stage).out)
+    ia = parse_imports(kit.da(["imports", after_ua, kit.usmap], log, stage).out)
+    if ia[:len(ib)] != ib:
+        bad = [i for i in range(len(ib)) if i >= len(ia) or ia[i] != ib[i]]
+        raise BuildError(stage, "%s: existing imports were reordered/changed (first bad index %s)"
+                         % (label, bad[:8]), "the ImportMap must only ever grow at the end")
+    log(stage, "  APPEND-ONLY OK  %s: names %d -> %d, imports %d -> %d, every old index intact"
+        % (label, len(nb), len(na), len(ib), len(ia)))
+
+
+def append_mi_refs(kit: Kit, da_uasset: str, work: str, rows: Sequence[BgRow],
+                   log: Log, stage: str = "L3") -> str:
+    """Chain `da-patch bgref` once per new preview MI.
+
+    Each call appends exactly 2 imports (Package + MaterialInstanceConstant) to the
+    DA ImportMap and reports the FPackageIndex the row's `@30` must carry.
+    """
+    cur = da_uasset
+    for i, r in enumerate(rows):
+        od = ensure_dir(os.path.join(work, "bgref_%02d" % i))
+        res = kit.da(["bgref", cur, kit.usmap, od, r.mi_pkg, r.mi_obj], log, stage)
+        if not res.ok:
+            raise BuildError(stage, "da-patch bgref failed for %s" % r.mi_obj, res.tail())
+        m = BGREF_RE.search(res.out)
+        if not m:
+            raise BuildError(stage, "bgref did not report the new reference for %s" % r.mi_obj,
+                             res.tail())
+        r.mi_ref = int(m.group(1))
+        if int(m.group(3)) != int(m.group(2)) + 2:
+            raise BuildError(stage, "bgref import accounting is wrong for %s" % r.mi_obj,
+                             m.group(0))
+        newu = os.path.join(od, os.path.basename(da_uasset))
+        if not os.path.isfile(newu):
+            raise BuildError(stage, "bgref produced no %s" % newu)
+        cur = newu
+        log(stage, "  +row MI %s -> %s (@30=%d)" % (r.mi_obj, r.mi_pkg, r.mi_ref))
+    if rows:
+        assert_name_import_append_only(kit, da_uasset, cur, "DA_Backgrounds + %d MI(s)" % len(rows),
+                                       log, stage)
+    return cur
 
 
 def append_bg_rows(kit: Kit, da_uasset: str, work: str, rows: Sequence[BgRow],
-                   expected_native_count: int, log: Log, stage: str = "L3") -> str:
-    """Add the needed FNames, then append the 34-byte rows. Returns the uasset path."""
+                   expected_native_count: int, log: Log, stage: str = "L3",
+                   allow_uasset_growth: bool = False) -> str:
+    """Add the needed FNames, then append the 34-byte rows. Returns the uasset path.
+
+    `@30` (the row's preview material, a *hard* reference) is either inherited from
+    the clone source (`allow_uasset_growth=False`, the v1 behaviour) or taken from
+    `row.mi_ref` -- the MI this row's thumbnail must render.
+    """
     if not rows:
         return da_uasset
     needed: List[str] = []
@@ -226,15 +314,25 @@ def append_bg_rows(kit: Kit, da_uasset: str, work: str, rows: Sequence[BgRow],
         struct.pack_into("<I", e, 14, 0)
         struct.pack_into("<I", e, 18, idx[r.obj])
         struct.pack_into("<I", e, 22, 0)
-        if struct.unpack_from("<i", e, 30)[0] != src_ref:
-            raise BuildError(stage, "internal: @30 was mutated")
-        bad = [o for o in range(BG_STRIDE) if o not in MUTABLE and e[o] != src[o]]
+        mutable = set(MUTABLE)
+        if allow_uasset_growth:
+            if not r.mi_ref:
+                raise BuildError(stage, "row '%s' has no MI reference to write into @30" % r.key,
+                                 "run `da-patch bgref` for every new row before appending it")
+            struct.pack_into("<i", e, 30, r.mi_ref)
+            mutable |= set(range(30, 34))
+        if struct.unpack_from("<i", e, 30)[0] != (r.mi_ref if allow_uasset_growth else src_ref):
+            raise BuildError(stage, "internal: @30 was mutated for row '%s'" % r.key)
+        bad = [o for o in range(BG_STRIDE) if o not in mutable and e[o] != src[o]]
         if bad:
             raise BuildError(stage, "row %d changed bytes outside the 3 slot groups: %s"
                              % (cnt + i, bad))
         new_rows.append(bytes(e))
-        log(stage, "  +row #%d key='%s' pkg=%s ast=%s @30=%d (inherited, -> import[%d])"
-            % (cnt + i, r.key, r.pkg, r.obj, src_ref, ref_i))
+        log(stage, "  +row #%d key='%s' pkg=%s ast=%s @30=%d (%s)"
+            % (cnt + i, r.key, r.pkg, r.obj,
+               struct.unpack_from("<i", e, 30)[0],
+               "-> our MI import[%d]" % (-r.mi_ref - 1) if allow_uasset_growth
+               else "inherited, -> import[%d]" % ref_i))
 
     ip = BG_ROWS_OFF + BG_STRIDE * cnt
     built = bytearray(native[:ip] + b"".join(new_rows) + native[ip:])
@@ -252,10 +350,15 @@ def append_bg_rows(kit: Kit, da_uasset: str, work: str, rows: Sequence[BgRow],
                          % (old, len(hits), os.path.basename(cur)))
     new_serial = len(built) - 4
     struct.pack_into("<q", ua, hits[0], new_serial)
-    diff = [i for i in range(len(ua)) if ua[i] != native_uasset[i]]
-    outside = [i for i in diff if not (hits[0] <= i < hits[0] + 8)]
-    if outside:
-        raise BuildError(stage, "uasset changed outside the SerialSize field: %s" % outside[:16])
+    if not allow_uasset_growth:
+        diff = [i for i in range(len(ua)) if ua[i] != native_uasset[i]]
+        outside = [i for i in diff if not (hits[0] <= i < hits[0] + 8)]
+        if outside:
+            raise BuildError(stage, "uasset changed outside the SerialSize field: %s" % outside[:16])
+    else:
+        # the ImportMap legitimately grew by 2 entries per new MI -- that was proven
+        # append-only (old name/import indices untouched) before we got here.
+        log(stage, "  uasset grew by the MI imports (append-only already proven)")
     log(stage, "  SerialSize @0x%X: %d -> %d" % (hits[0], old, new_serial))
 
     open(uxp, "wb").write(bytes(built))

@@ -9,7 +9,239 @@
 > **游戏本体 `D:\CalabiyanGalgameMaker\CalaPlayer` 一律只读**；改写只允许发生在
 > `Content\Paks\CalaPlayer-Windows_P.{pak,ucas,utoc}` 这一个同名补丁容器上。
 
-## 当前阶段：CP-33（M1~M4 真机验收 + GUI 六轮：G0~G5 → UI/UX → 分隔条/引导 → 中英双语/LineSidebar/社区 → SquishSwitch/乱码解码/GlideSelect/社区四入口 → **引导只弹一次/社区栏改版/下拉穿透/左栏定宽**）
+## 当前阶段：CP-37（图集路线：**双 MI 方案复核 ⇒ 单 MI 原生形态**；等用户拍板 A/B/C + P1/P2 后再动手）
+
+### CP-37（2026-09-26）：图集路线**已实现**（单 MI 原生形态 + 图集追加 + 上限 59）
+
+* **用户拍板（原话要点）**：「选 A（单 MI 原生形态），并带 B 的验证门…**共块策略选 P1**（默认重组再编码）…
+  先放 1 张真机验证（序号 165 / (1260,1430)）…**背景默认上限从 50 改到 59**（代码现在一并改掉）…
+  真机验证通过后，再补满 59 格。`-Combined` 的 DA bug 继续保持只记账不修。**开工吧**」。
+* **已实现（本轮）**：
+  ① `core/atlas.py`（新）：图集**等长原地**像素手术 —— 结构定位 mip0（用文件长度方程 + 每级 16 B 记录
+  链自证，**不依赖 `HEADER_LEN`**，因此我们自己上一轮的图集也能当基线）、逐 mip 把 250×141 格子写进
+  格子覆盖的 BC1 块（**P1**：边界块保留"原始解码像素"+ 我方矩形内像素重组再编码）、`verify()` 当场出
+  A9/A9b 数字、`cell_quality()` 打 `QUALITY: PSNR`、`stage_atlas()` 一次完成"拷贝→嵌入→自证→写回"。
+  ② `mimk` 新增 **`-` 哨兵 = 保持壳自己的 `SourceTexture`**（不清 import、不重指纹理）⇒ 我们的 MI 第一次
+  与原生 `MI_BackgroundPreview_NNN` **形态完全一致**，语义上只改 `SpriteX/SpriteY` 两个 float（实测
+  `imports=7` 不变、uexp 312 B）；C# 已按规矩重发布（dotnet-sdk10 `--no-restore` → 删 .pdb）。
+  ③ `builder.py`：`Material.cell_index`、`_extract_atlas()`（抽图集 + 分配格子，`-Combined` 时从 manifest
+  **复用上一轮的格子号**）、L1 出 `norm/<name>.tile`、L2 `_build_atlas()`（基线 = 上一轮图集或原生）、
+  `_build_mi()` 双形态（atlas / whole-image）、L4 把图集当**第 5 个同路径覆盖**拷进 legacy 树、
+  `_carried_assets()` 排除图集（避免双份）、A5 期望 override 数 +1。
+  ④ 三个新门：**A9**（差异块集合 ⊆ 我方格子块集合 + CUE4Parse 读回 4096×2048/PF_DXT1/13 级且逐级
+  sha256 与我们所写一致）、**A9b**（原生 165 格采样矩形内的差异像素：**mip0 = 0**；mips≥1 报数与最大
+  通道差）、**A10**（容器里读回 MI：`SourceTexture = T_BackgroundPreviews` + 6 标量 = 格子坐标/250/141/4096/2048）。
+  ⑤ `-NoAtlas`（CLI + `build_srcm.ps1`；GUI 开关与前端文案留到下一轮）+ `MAX_BG = 59`；回归新增
+  **T27**（1 张 → cell 165）/ **T28**（`-NoAtlas`），共 **29 场景**。
+* **实测（离线，1 格）**：mip0 差异块 2268 = 恰好格子矩形、**原生像素改动 0**；mips1..4 改动 548 像素、
+  最大通道差 42（一格宽的接缝，P1 的已知代价）；格子 PSNR 30.4 dB；uasset 逐字节未动、uexp 长度不变。
+* **真机验收（2026-09-26，图集补丁已装机）**：装机后**游戏正常启动**；**A11 探针 PASS**（选中 bgdark 那行时
+  右侧预览块与时间轴单元格拿到 `(1260,1430)`，纯只读、零 UFunction）；**P1 接缝用户肉眼两次"看不出来"**。
+  **A12 截图对比门实测未达 35 dB**：同一个 chip（真机渲染实测 **146×82**）`PSNR=26.44 dB`、
+  锐度 1715→1196（**−30%**）；真因 = **分数 LOD**（格子 250 texel / chip 146 px ⇒ 足迹 1.7 texel/px
+  ⇒ 渲染是 mip0(250) 与 mip1(125) **各半**的混合；2K 路径足迹 17.5 texel/px ⇒ LOD≈4.1 ⇒ mip4≈1:1 出图）。
+  ⚠️ 我原先"格子面积比显示面积大 2.9 倍 ⇒ 不降级"的结论**被这次实测推翻**（评估文档 §3.2 与开发指南
+  §3.4 已当场更正）。
+* **用户拍板（2026-09-26）：方案 ① —— 接受，正式定稿**。原话要点：「肉眼层面无感知…这个 30% 的锐度下降
+  在 146x82 的小格子里面，肉眼根本不可能察觉」「数据反而更优：与理想参考的 PSNR 19.96 比之前 19.20 更好」
+  「**不要做任何额外手术**：方案 ②（换父材质）风险极高且可能找不到；方案 ③（锐化代偿）会导致预览块产生光晕
+  …**极其不划算**」⇒ **图集方案锁定，不再做画质调整**；README/CHANGELOG/Release 文案已按此更新
+  （「已知边界」写明"下拉缩略图锐度轻微降低约 30%、肉眼无感、是换取时间轴与预览块完整显示的合理妥协"）。
+* **未做**：补满 59 格（等发布后再补）、GUI 的 `-NoAtlas` 开关 + 前端文案（CLI/ps1 已有）。
+
+* **用户诉求**：保留 `MI_<名字>` 指向 2K 大图（继续服务下拉缩略图 / 大预览 / PLAY），
+  另建一个"图集 MI"让 `@30` 指向它、专门服务时间轴 + 右侧预览块；并要求三条离线判据
+  （下拉缩略图没被替换 / 时间轴与预览块坐标对 / 新 MI 不污染原生 165 个 MI）。
+* **复核结论：双 MI 写不进资产格式。** 本轮从上一轮探针的 jmap（`editor_try1.jmap`）拿到**实名**证据：
+  `S_BackgroundAssetData` 一行 34 B **只有一个预览槽**（`+30`），而三个消费者**全都从它派生** ——
+  **下拉 chip 的 MID 父对象 = `@30` 那个 MI 本身**（原生行 `a00f4` → `MI_BackgroundPreview_164`；
+  我们的行 `1d3653` → `MI_bgdark`）；右侧预览块的 MID 父 = `MMI_BackgroundPreview`（只抄 2 个坐标）；
+  时间轴单元格的 MID 父 = `MMI_SubslotContentBackground`（抄 3 个标量）。两个接收端材质的
+  `TextureParameterValues` 都是**空**（父材质默认 = 图集）⇒ **静态补丁下它们永远只能显示图集格子**。
+* **诉求仍 100% 达成**：chip 的**实测显示尺寸 = 163×92**（`WBP_CharacterListItem.Spacer_94.Size`，
+  `Button_22` 是 `OverlaySlot_0` 的 `HAlign_Fill/VAlign_Fill` 铺满整格，我们的 MID 就是它的 brush），
+  而图集格子 **250×141** ⇒ 比显示面积大 **2.35 倍**（线性 1.53×）⇒ **换图集格子不会掉画质**，
+  且与 165 个原生条目**逐字段同构**。⇒ **设计本体不变**（仍是"唯一 MI · 原生形态"），只是理由要改写成
+  "chip 不需要 2K"，而不是"为了图集牺牲 chip"。
+* **`mimk` 因此更简单**：`SourceTexture` 与 4 个标量本来就已经等于目标值 ⇒ 只改 `SpriteX/SpriteY` **8 字节**
+  （旧的"重指贴图 + 改 ImportMap + 改 12 字节"整套消失）。
+* **判据精确化**：**mip0 下 165 个原生缩略图逐字节不变（0 改动）**——因为格子 X 起点 1260 = 4×315 压在块边界上，
+  Y 的 2 行偏差正好落在格间 2px 黑间隔里；**mips ≥1** 有 **16 格**（序号 165..175 的第 10 行 11 格 +
+  176..180 的第 11 行列 0..4）会与原生邻居共 1 块宽 ⇒ 需拍板 **P1（重组再编码，默认）** /
+  **P2（`-AtlasStrict`，整块跳过，原生零改动但自己格子边缘薄暗边）**。A9 = 差异块 ⊆ 我方格子块集合；
+  A9b = 原生 165 格采样矩形内的差异像素数（mip0 断言 == 0）。
+* **交付**：`docs/CP37_ATLAS_MI_STRATEGY_ASSESSMENT.md`（含 C1/C2/C3 三条判据、A12 截图对比门、
+  方案 A/B/C、P1/P2、分阶段执行）；`docs/CP36_ATLAS_APPEND_DESIGN.md` 头部已加指针。
+  只读自证：真机 6 个文件哈希 + `Scenarios.sav` 探针前后全一致；收窗后已清残留进程。
+* **按用户指令挂账不修**：`-Combined` 的 DA bug（等图集落地后再处理）。
+
+### CP-36（2026-09-26）：R2 翻篇 + 图集评估 + 2K 补丁真机 + Release
+
+* **R2 彻底废弃（用户拍板）**：`--refresh-backgrounds` 标 `[DEPRECATED]`（帮助文本 + 运行期 4 行警告），
+  `work/cp35_r2_*.py` 三个脚本头部标 `[ARCHIVED 2026-09-26]`。
+  **回归场景 0 处需要删**（产品仓 `tests/` 对 `R2 / refresh_bg` 零命中）。
+  用户可见的已知边界写进了 `README.md` / `README.en.md` 的「🧭 已知边界」：
+  时间轴单元格 + 右侧 Background 预览块**不显示新增背景**（原生蓝图不响应，连原生背景也不显示）；
+  下拉缩略图 / 主菜单封面 / 游戏画面背景本体不受影响。
+* **预览图集追加方案：只读评估完成** → `docs/CP35_ATLAS_APPEND_ASSESSMENT.md`（配图
+  `docs/images/cp35_atlas_free_space.png`）。核心实测：图集 `4096×2048 / PF_DXT1 / 13 级`、
+  **13 级全内联（无 .ubulk）**、格子 `250×141` 步长 `252×143`、**165/224 格被占用、y≥1572 全是纯黑空区**；
+  `SpriteX=c*252 / SpriteY=r*143` 由 8 个原生 MI 实测钉死；两个问题控件的父材质
+  （`MM_BackgroundPreviewBase` / `MM_SubslotContentBase`）**本来就直接 import 图集并声明那 7 个参数**。
+  **2026-09-26 两轮只读活进程探针跑完（`--probe-bg-writers`）⇒ 结论：这条路可以走，不需要等作者下一版。**
+  机制 = 两个控件都是"接收端"，游戏自己把**该行 `@30` MI 里的 `SpriteX/SpriteY`** 写进运行期材质
+  （右侧预览块：改写同一个 MID 的 2 个标量；时间轴单元格：**每次选择新建一个 MID**、3 个标量，
+  真源是 `Border_32` 的 `Background` brush@528，而不是那个从来没人写的 `BackgroundMaterial` 字段）。
+  **修订版设计见 `docs/CP36_ATLAS_APPEND_DESIGN.md`**：我们的 `MI_<名字>` 改成原生形态（`SourceTexture`→图集、
+  坐标 + 250/141/4096/2048），缩略图放在**游戏自己的格子**上（序号 165 起，`i%16 / ⌊i/16⌋`、
+  `(列×252, 行×143)`），**容量 59**（用户拍板用满），判据 A9/A9b/A10/A11 + 四层回滚。
+  三个关键实验：原样过 `to-zen` 读回 **13/13 级 sha256 全等**（容器重建无损）、翻转 1 字节 ⇒
+  **只有 mip0 哈希变**（覆盖确实生效）、改动是**等长像素替换**（uasset 的 SerialSize/BulkDataMap 全不动）。
+  ⚠️ **上面这段里的"块对齐 48 格 / 原生像素任何 mip 都逐字节不变 / 谁写坐标未证明"三句已过期**：
+  用户已改判 **容量 59**（块对齐 48 的假设被"游戏按 `@30` 的坐标"推翻），
+  且"谁写坐标"两轮活进程探针已证明 = **游戏自己从该行 `@30` 的 MI 抄**。
+  放置与 mip 级影响的**当前有效版本**见 `docs/CP37_ATLAS_MI_STRATEGY_ASSESSMENT.md` §6。
+* ⚠️ **`-Combined` 现在是坏的（本轮抓到，尚未修）**：`-Combined` 时 DA 的基线是"上一轮**已追加**的 DA"，
+  而 `da-patch bgref`/`addname` 走 UAssetAPI 重新序列化，在**已追加**的 DA 上会让 **uexp +34 B（一整行）
+  而行计数不变** ⇒ L3 的 trailer 门拒绝（`DA_Backgrounds trailer check failed`，失败安全网正常，游戏目录零写入）。
+  实测对照：原生 DA(165 行) 上 `bgref`/`addname` **+0 B**，已追加 DA(166 行) 上两者都 **+34 B**。
+  **29 场景抓不到的原因**：唯一覆盖 `-Combined` 的 T13 第二次跑用 `srcm="extra"`（只有 `Ambient\extra.wav`），
+  `DA_Backgrounds` 那一支 `rows=[]` 从不调 `bgref`。建议修法（架构级，等拍板）：`-Combined` 时把 DA 基线换成
+  **原生 DA**，把 carried 行 + 新行用字节级 `append_bg_rows` 一起追加。
+* **路线 B 真机装机完成（用户授权）**：`_P.ucas` **101,641,594 B** `59EE5D384B588407` / `.utoc` 20,318 B
+  `97719BFFCE07F198`；A0~A10 全 PASS；装后**从真机目录读回** 3 张背景 `2560x1440 PF_DXT1 12m`（12 级哈希全 OK）、
+  3 条音频逐字节一致、DA live rows 168/101/20/112；原生 5 容器与 `Scenarios.sav` 逐字节未动。
+  回滚源 = `work_cp35\routeb_real\out_patch\_prev_container\`（旧 `29AE4489C235F10A`/`6E8877AEE92B8F61`）+
+  独立备份 `work_cp35\routeb_real\backup_20260926\real_P\`；一键回滚 = 该 out_patch 的 `uninstall.ps1`。
+  本轮**没用 `-Combined`**（见上一条 bug），改成新 out_patch 里的**全新构建**，srcm 里放上"上一轮全部素材
+  （文件名保持一致）+ 2 张 2560×1440 新背景" ⇒ 产物是旧补丁的**超集**。
+* **Release 筹备**：`docs/RELEASE_NOTES_v1.1.0.md`（GitHub Release 正文）+
+  `dist\release_handover_20260926\UPLOAD_MANIFEST.md`（4 个 zip 的全 sha256 / 上传清单 / 手工 git 命令）。
+  4 个 zip 已核对：GUI minimal `2F1344B84E80603A`、GUI full `3850DB0510E94062`、
+  CLI minimal `C755A64D5CC218E8`、CLI full `6E742EF12A761C1E`。
+  **本机代理 `127.0.0.1:7897` 未监听 ⇒ 未推送**（tag/tag 改名也留给用户拍板）。
+
+* **用户拍板（2026-09-26，五条）**：
+  ① **授权只读探针**：确认"当前 build 里谁把 `SpriteX/SpriteY` 写进那两个材质"——只读、不调 UFunction、
+  不写盘 ⇒ 已实现 `--probe-bg-writers`（launcher 新流程 + `ue_reflect.js` 的 `probe_brush_writers`，
+  该 action 里**没有任何 `invoke`**；观察器复用 R2 的选择检测但触发只读探针）；
+  ② **背景上限**：~~取 48（硬上限），只有显式 `-Force` 才允许突破到 50~~ ⇒ **2026-09-26 改判
+  `MAX_BG = 59`**（= 图集空闲格数；超过 59 才需要 `-Force`，并警告缩略图不显示）；
+  ③ **Release 由用户自己推**（他去查代理；起不来就手动传网盘 + 用 `docs/RELEASE_NOTES_v1.1.0.md`）
+  ⇒ 我不用管这块；
+  ④ **路线 B 真机由用户自己验收**（他进 Create 看 2K 效果；没问题就保持现状）；
+  ⑤ **`-Combined` 的架构级 bug 先记账、不修**（他认可"DA 基线改用原生 DA + 统一走字节级 `append_bg_rows`"，
+  但等图集路线定了再一起处理）。
+
+### CP-35（2026-09-25）：版本号 v1.1.0 + 时间轴/预览块只读侦察（**已被 CP-36 取代**）
+
+* **用户实测回报（真机）**：CP-34 的缩略图修复**生效**——下拉条目的小预览已经是自定义图；
+  但**左侧 Preview block 与底部 Timeline entries 仍显示原版/空白**。作者原话说这三处
+  （dropdown entries / timeline entries / preview block）都能用"基于 `MMI_BackgroundSelector`
+  的材质实例"实现。
+* **版本号 1.0.0 → 1.1.0**（向后兼容的功能新增）。版本号只有一个源头：
+  `core/builder.py::TOOL_VERSION`，被 CLI 横幅/`-Version`、GUI 的 `/api/health` → 右上角 `v1.1.0`
+  胶囊、`build_report.json`/`manifest.json` 的 `version` 共同消费；`gui/frontend/package{,-lock}.json`
+  同步到 1.1.0（改 package-lock 后**别用 `Set-Content -Encoding utf8`**，PS 5.1 会加 BOM；
+  用 Python 以 `utf-8` 无 BOM 重写，并 `json.load` 验一遍）。新增 `CHANGELOG.md`，
+  `README.md`/`README.en.md` 加「更新日志」小节 + 两条功能特性（缩略图 / 防拉伸）。
+* **只读评估全文**：`docs/CP35_TIMELINE_PREVIEW_ASSESSMENT.md`（含证据与方案 A/B/C、风险表）。
+  已确证：① DA 行的值结构体 `S_BackgroundAssetData` **只有两个字段**——
+  `Background`(SoftObject→Texture2D) 与 `Preview`(Object→MaterialInstanceConstant)，
+  后者就是 `@30`；② **原生 165/165 行满足 `map key == 贴图对象名`**，我们的行故意不满足
+  （key=中文显示名，obj=ASCII 清洗名）；③ 32 个 WBP 里 **`SetBrushFromTexture` 0 命中**、
+  **`MMI_BackgroundSelector` 0 命中**——三处一律走"材质/动态材质实例"；
+  ④ 预览块 `WBP_BackgroundPreview` 只渲染别人塞进来的 `PreviewMaterial`（它自己用
+  `GetDynamicMaterial` + `K2_GetScalarParameterValue` 读 SpriteX/Y 算尺寸），
+  喂它的是 `WBP_DetailsPanel`（内部有 `BackgroundsData`/`BackgroundNamesPreviews`/`BackgroundsPath`
+  + `Map_GetKeyValueByIndex` + `SetImage` + `SetBrushFromMaterial`）；
+  时间轴 = `WBP_TimelineTrackHeaderItem`(`BackgroundDynamicMaterial`+`SetBrushFromMaterial`) 与
+  `WBP_TimelineSubslot`(`Map_Find(DA_Backgrounds.BackgroundMap, 步骤背景名)` → `WBP_SubslotContent`
+  的 `BackgroundMaterial`)。
+* **待用户做两个 30 秒判别**：D1 在编辑器里把**当前步骤**的背景选成我们的新条目 ⇒ 若变对就是
+  "显示的是步骤背景"（不是 bug，方案 B）；D3 换**纯 ASCII 文件名**（key==obj）重打一版 ⇒
+  若变对就坐实"按名字查找/拼路径"假设（方案 A：让 DA key 与对象名同源，**不需要动 ImportMap**）。
+* ⚠️ **本轮踩到的坑（务必沿用）**：`build_gui.ps1` 会 `Remove-Item` 再重建 Kit，若上一次
+  `gui_exe_check.py` 拉起的进程还没完全释放 exe 句柄，`Copy-Item` 会失败并**把 Kit 留成半成品**
+  （只剩 exe、`kit/` 没了）——接着跑 G4 就会以一种"莫名其妙"的方式挂掉（成功弹窗变成失败弹窗、
+  `CREATE_NO_WINDOW` 计数=1）。**规矩：重打后先跑 `scripts\check_dist.ps1`**（它会报 `kit\ is missing`），
+  别直接信 G4 的结论。
+* 本轮验收：CLI Kit 重打并 `-Version` → **1.1.0**；回归 **26/26 0 失败（241.3 s）**；
+  `G1 RESULT: OK`；GUI Kit（第一次因 exe 句柄被占留成半成品 → `check_dist` 抓到 → 重打干净）
+  `check_dist` 8 Kit 全 OK、`G4 RESULT: OK`，冻结自检日志里 `health: version 1.1.0` /
+  `page->api : v1.1.0`（GUI 右上角胶囊即读这个）。
+  v1.1.0 交付件：CLI exe `91448A794865104D`/25.6 MB、GUI exe `F3980D16677C78F6`/41.0 MB、
+  `kit\da-patch.exe` 仍是 `F0805B7A6DE6E9F1`（本轮没改 C#）。
+
+### CP-34（2026-09-25）：16:9/宽高比约束 + 缩略图 MI（新建 `MI_<name>` + DA ImportMap 末尾追加）
+
+**任务一：背景缩略图（v1 明确不做的那个，现在做了）**
+* 机制回顾（已在只读取证里钉死）：DA 行有**两条互不相干的引用通道** —— `+10` 软路径（大预览 +
+  PLAY）与 **`@30` = 硬引用 FPackageIndex**（下拉缩略图 + 侧边小预览）。v1 让新行 `@30`
+  **继承克隆源**，于是缩略图永远显示克隆源那一格（原生图集 `T_BackgroundPreviews` 的某格）。
+* 本轮：每个新背景 = 独立贴图包 **+ 独立的预览 MI**：
+  - 克隆源**不硬编码**：L0 读 `DA_Backgrounds` 第 0 行的 `@30` → 在 DA 自己的 ImportMap 里解析出
+    MI 对象名 + 包路径（沙箱里是 `MI_BackgroundPreview_000`，未打补丁的原生 DA 是 `_013`），
+    再按这个包路径从原生容器里**白名单**解出（`retoc to-legacy -f` 是子串匹配，不能整目录拷）。
+  - `da-patch mimk`：克隆该 MI，**内部身份三处一起改**（`FolderName` + 名字表包路径 + export
+    ObjectName），在**它自己的 ImportMap 末尾**追加 2 条 import（`Package` + `Texture2D`），把
+    `TextureParameterValues` 的对象引用重指到我们的贴图，并写 6 个标量
+    （`SpriteX/Y=0`、`SpriteWidth/Height` 与 `TextureWidth/Height` = **目标画布**，
+    v1.1.0 起 = 2560/1440，由 `config.TARGET_W/TARGET_H` 派生、自动同步）。
+  - `da-patch bgref`：在 **DA 的 ImportMap 末尾**追加 2 条 import（`Package` +
+    `MaterialInstanceConstant`），打印该 MI 的 `FPackageIndex`；python 把它写进**这一行**的 `@30`。
+  - 判据（A8，新增）：容器里读回来的 `@30` 必须解析成 `MaterialInstanceConstant` 且名字 = 我们的
+    `MI_<name>`，并且那个 MI 的 `SourceTexture` 指向我们的贴图（`da-patch miprobe` 机器可读输出）。
+* **只追加不重排**：新增 `assert_name_import_append_only()` —— 用 `probe`（名字表）与 `imports`
+  （ImportMap）的**语义转储**证明"老名字/老 import 的索引与内容逐条不变，只在末尾长出来"
+  （UAssetAPI 会重排整个文件，字节 diff 在这里**不能**当判据）。实测沙箱：names 490→494、
+  imports 333→337，`APPEND-ONLY OK ... every old index intact`；`@30` 逐行不同（-335 / -337）。
+* **M0 字节保真**：MI 壳 `roundtrip` uasset+uexp **逐字节一致**（已并入 A0 的第三个对象 `mi_shell`）。
+* **零污染可量化**：MI 包是 brand-new package（A5 台账 0 命中），原生 5 容器哈希未变。
+* 本地最小验证（只读）：`mimk` 前后 MI uexp **只变 12 字节**（6 个标量槽 + 贴图 `FPackageIndex`），
+  长度 309 B 不变；`bgref` 后 DA uexp **逐字节不变**（只长 uasset 的 ImportMap）。
+* **`-NoThumb` 是诊断开关**（CLI/ps1/GUI 都通了）：不造 MI、`@30` 回到"继承克隆源"的 v1 行为，
+  A8 显式 `skipped`。万一真机缩略图路线出事，用户可以一键回到 v1 形态对比。
+* ⚠️ **作者截图里的 8 个参数并不都与游戏 MI 一致**：游戏自带的 MI 只有 **6 个标量**
+  （`SpriteX/Y/Width/Height/TextureX/Y`），**没有 `isSelected`**；`mimk` 会写存在的，
+  并把缺席的按名字报出来（`absent: isSelected`），不硬塞。
+
+**任务二：宽高比约束（防变形）**
+* 新规则（用户 2026-09-25 拍板）：
+  - **宽 > 高（landscape）→ 放行**；不是 16:9 的宽屏图（1233×725、3440×1440…）也放行，
+    但 CLI/GUI 日志里给 `WARN: 非 16:9 图片 ... 直接用原图在游戏内会被拉伸变形；本工具已按
+    -Fit <mode> 规范化为 2560x1440 再打包`。
+  - **正方形（`|w-h| ≤ max(2, 2%·h)`）与竖屏（w < h）→ 默认硬拒绝**，中文提示
+    `本工具目前仅支持宽屏图片（宽 > 高，推荐 16:9），请自行裁剪或加黑边转换为 16:9（如 2560x1440）；
+    也可以加 -Fit contain 让本工具居中补 (18,18,22) 黑边到 2560x1440。`
+  - **显式 `-Fit contain` = 唯一逃逸口**：竖屏/方图被居中补 `(18,18,22)` 黑边成 2560×1440 后放行。
+  - 检查发生在 **L0 扫描阶段**（`_check_bg_aspects`）；打不开的图**留给 L1** 报 `cannot decode image`
+    （T6 判据不变）。
+* 回归夹具/判据改造：`bgonly` 只留 16:9；新增 `bgportrait`(90×160) / `bgwide`(1233×725) /
+  `bgsquare`(1024×1024)；**T5 换成竖图 + contain，并把"日志里有 borders"升级成几何真值**
+  （在 build 自己写出的 `verify/b_preview.png` 上量：中线首末像素 = 黑边色、左右黑边等宽 ±2px、
+  中间确实有画面）——实测 `328|328 px bars, picture 304 px wide`。
+
+**本轮验收**
+* 回归 **29 场景 26/26 0 失败（247.0 s）**，真机目录未被改动（沙箱 `DRIFTED` 是信息性的：沙箱
+  `_P` 还是用户那版旧容器）；T16/T17 两个条件场景另用**全量 Kit** 补跑（`--kit` / `--exe`）**PASS**。
+* GUI：`tests\gui_api_check.py` → **`G1 RESULT: OK`**；源码
+  `python gui\desktop.py --selftest --selftest-ui --selftest-shell` → **`SHELL UI SELFTEST: OK`**；
+  重打 GUI Kit 后 `tests\gui_exe_check.py` → **`G4 RESULT: OK`**；`scripts\check_dist.ps1` → 8 Kit 全 OK。
+  **顺带修掉自检自身两个缺陷**：① 主题判据原来假设"启动必是暗色、第一次 toggle 必变亮色"——
+  只要上一次留下 `cala-theme`（或运行中有人按到那颗芯片）就会反向失败；现在改成
+  **读起始态 → toggle 断言翻转 → 再 toggle 断言还原**（并加一条启动期诊断 `theme at startup`）。
+  ② 图层不透明度原来断言 `== 1/0`，而 620 ms 交叉淡入没落定时会读到 `0.9985` ⇒ 改成
+  「当前主题那一层 ≥ 0.9、另一层 ≤ 0.1」。③ `check_dist.ps1` 把 `dist\release\`（GitHub Release
+  的 zip 附件，不是 Kit）当 Kit 检查，永远红 ⇒ 显式跳过。
+* 点名的两张 16:9 图：**1080p 1920×1080 → PSNR 30.00 dB**、`A0~A10` 全 PASS（`mi_shell` 逐字节一致、
+  `MI_full_hd_16x9@-335`）；**写实 4K 3840×2160 → cover 0.5× 无裁剪 / PSNR 43.00 dB / A0~A10 全 PASS**。
+  另：一张**逐像素噪声**的合成 4K 图会被画质门拦下（`PSNR=24.61 dB < 25.0 dB`）——那是门在干它该干
+  的事（BC1 对高频噪声本来就有损），`-Force` 可越过。
+* 重新发布 `kit\da-patch\da-patch.exe`（`dotnet publish --no-restore`，**必须**再跑
+  `build_kit.ps1` + `build_gui.ps1`，因为 Kit 是拷贝）⇒ CLI Kit 82.7 / 287.0 MB、GUI Kit
+  98.1 / 302.5 MB（`..._20260925`；exe `E6DD253919923B84`/25.6 MB、GUI `CB676B9285EC53CB`/41.0 MB，
+  `kit\da-patch.exe` 四个 Kit 同哈希 `F0805B7A6DE6E9F1`）。
 
 ### GUI 第六轮（2026-09-24，全部有断言、可复跑）
 
@@ -183,9 +415,9 @@
 
 ### 已完成（有判据，可复跑）
 
-* **M1** 背景：`srcm\bg\*` → cover/contain 适配 1920×1080 → 自研 BC1 11 级 mip →
-  克隆原生壳 + `da-patch namerepl` 改内部身份 → 独立 `UTexture2D` 包
-  → `DA_Backgrounds` 只追加（34 B/行，`@30` 原样继承）。
+* **M1** 背景：`srcm\bg\*` → cover/contain 适配 **2560×1440**（v1.1.0 起）→ 自研 BC1 **12 级** mip →
+  克隆原生壳 + `da-patch namerepl` 改内部身份 → **整块重建 `.uexp`**（同尺寸逐字节回环门 + uasset
+  `SerialSize`）→ 独立 `UTexture2D` 包 → `DA_Backgrounds` 只追加（34 B/行，`@30` 指向我们的 `MI_<name>`）。
 * **M2** 音频：`srcm\{BGM,Sound,Ambient}\*` → WAV 头自检，不合规才调 ffmpeg
   （`-ar 48000 -ac 2 -c:a pcm_s16le`）→ `da-patch sndmk` 造 PCM 流式 SoundWave
   → 修 Zen `BulkDataMap.SerialSize` → `DA_BGM`/`DA_Ambient`/`DA_Sounds` 只追加（28 B/行）。
@@ -260,10 +492,27 @@
 1. **等用户确认 `docs/cleanup_plan_20260924.md`**（≈3.46 GB，`scripts\clean.ps1 -Apply` 执行；
    `tests\mat` 必须最后删，`gui_exe_check.py` 需要它，回归会重建）。
 2. **GUI 画面等用户再看一次**（若他给 Uiverse / ReactBits 具体条目，就用 `.uv-scope` 包上替换）。
-3. 背景缩略图修正（新建 `MI_BackgroundPreview_User_BG_0X` + ImportMap 末尾追加 import）——
-   v1 明确**不做**（用户拍板：接受缩略图不对，绝不为缩略图引入崩溃风险）。
+3. ~~背景缩略图修正（新建 `MI_BackgroundPreview_User_BG_0X` + ImportMap 末尾追加 import）——
+   v1 明确**不做**~~ ⇒ **CP-34 已做**（见本轮）：每个新背景一个 `MI_<name>` + DA ImportMap
+   末尾追加 2 条 import + 该行 `@30` 指向它，判据 A8；`-NoThumb` 保留 v1 形态作对比。
 4. 真机验收：用户需把 `out_patch` 装进**真实**游戏目录试听/试看（目前只跑过沙箱 fakegame）。
 5. OGG/Vorbis 压缩音频路线（体积降到 PCM 的 ~1/10）——后续可探索，v1 不做。
+
+### 路线 B 的坑（2026-09-25，v1.1.0 实测，务必记住）
+
+* **只改 uexp 的字节是"假成功"**：`SerialSize` 对了、A0/A6 的字节比对全绿，但 CUE4Parse 读出来是
+  **0 级 mip**（`FirstMipToSerialize=-1`）——因为 `retoc to-legacy` 把 Zen 的 BulkDataMap 搬到了
+  uasset 尾部，那张表里记着**每级 mip 的偏移与大小**，换尺寸后它就是陈旧的。
+* **只改记录表、不改它前面的计数**：CUE4Parse 读成 **11 级正确 + 第 12 级垃圾**
+  （`BulkDataFlags` 变 `PayloadAtEndOfFile|SerializeCompressed`、`byte[0]`、`SizeY/SizeZ=0`），
+  而**所有字节级判据仍然全绿**。⇒ 判据必须是"**用一个真的 UE 解析器把重建后的贴图读回来**"，
+  所以 A6 现在会 `tex_dump` 重建后的资产并核对尺寸/格式/级数/每级 sha256。
+* **"payload 后 16 B"的含义**：`FTexture2DMipMap = [FByteBulkData][SizeX][SizeY][SizeZ]`，
+  `FByteBulkData(inline) = [u32 表索引][payload]` ⇒ 那 16 B = 本级 3 个 dim + **下一级**的表索引；
+  索引 = 表下标（0,1,2…）。早先把它当成 `(X,Y,Z,i+1)` 也能"逐字节复现"，但只有按解析器的读法
+  才能在换级数时不翻车。
+* **别在 `stage_pure` 上做 CUE4Parse 读回**（那里只有 global + 我们的 `_P`，读出来会少一级）；
+  用 `stage_paks`（原生容器 + 我们的 `_P`）。
 
 ## 开工规则（沿用上游工程，且已被本项目实测验证）
 
@@ -283,9 +532,12 @@
 | 事实 | 数值 / 结论 |
 |---|---|
 | 补丁容器名 | `<Game>-Windows_P.{pak,ucas,utoc}`，mount `../../../`，无 scriptobjects.bin |
-| 背景壳 | `/Game/CalaPlayer/Backgrounds/T_Evni_Background_01_O`，uexp **1,383,410 B**，11 级 mip |
-| 纹理 uexp 布局 | 头部 **110 B**（`@50`=DataSize，`@90`=`PF_DXT1`，`@102`=MipCount）；mip0 紧跟头部；**mip1..10 每级前 16 B**；尾部 28 B |
-| 纹理 mip 尺寸 | 1036800 / 259200 / 65280 / 16320 / 4080 / 1080 / 256 / 64 / 16 / 8 / 8 |
+| 背景壳 | `/Game/CalaPlayer/Backgrounds/T_Evni_Background_01_O`，uexp **1,383,410 B**，11 级 mip（**只当模板**：v1.1.0 起按目标画布整块重建） |
+| 纹理 uexp 布局 | 头部 **110 B**（`@2/@6` 与 `@74/@78` 两处 SizeX/SizeY、`@10` 16 B 未明语义键、`@50`=DataSize=len-62、`@86`=`PF_DXT1`、`@102`=MipCount）；每级 mip = **负载 + 16 B 记录**（`SizeX,SizeY,SizeZ=1,i+1`，末级记 0）；尾部 8 B 零 + `PACKAGE_FILE_TAG`。⚠️ **头部长度是按资产变的，不是常量**（2026-09-26 实测订正）：图集 4096×2048 的**每级 16 B 记录与尾部 tag 和壳完全一样**，只是**头部 111 B / mip0 在 115**、`@2` 不是尺寸对（真尺寸对在 `@6`）、`@50`=0；`core/texture.py` 的 `HEADER_LEN=110` 是壳专用的 ⇒ 用它套图集会被同尺寸回环门拒绝（正确行为），换资产必须把头部长度按实测值驱动 |
+| 纹理 mip 尺寸（1920×1080 壳） | 1036800 / 259200 / 65280 / 16320 / 4080 / 1080 / 256 / 64 / 16 / 8 / 8 |
+| 纹理目标画布 | **2560×1440 / PF_DXT1 / 12 级**，uexp **2,458,274 B**；dims 用移位规则 `max(1,W>>i)`；uasset 只改 `SerialSize = len(uexp)-4`（该 8 B 模式唯一命中） |
+| 纹理 uasset 尺寸耦合字段 | **三个**：`SerialSize`；尾部 **Zen BulkDataMap**（每级一条 **44 B** = `u64 SerialOffset, i64 CookedIndex(-1), u64 SerialSize, u32 ElementCount, 2×u32 pad, u32 Flags(0x48), u32 pad`）；**该表前面的 u32 计数**（位于表首 `-8`） |
+| mip 结构的真相 | `FTexture2DMipMap = [FByteBulkData][int32 SizeX][int32 SizeY][int32 SizeZ]`，其中 `FByteBulkData(inline) = [u32 BulkDataMap 索引][payload]` ⇒ 文件里表现为"payload 后跟 16 B"= 本级 3 个 dim + **下一级**的 4 B 索引；索引值 = 表下标（0,1,2…），不是 i+1 |
 | 音频壳 | `/Game/CalaPlayer/SFX/Ambient/LS_BP3_Rain__SFX_`，uasset 859 / uexp 150 / ubulk 351086 |
 | 音频 uexp 布局 | 属性 `NumChannels@0x06` `SampleRate@0x0A` `Duration@0x0E(f32)` `TotalSamples@0x12(f32)`；`len(uexp) = 82 + 负载` |
 | Zen BulkDataMap | 4 字节 = 表索引；legacy uasset 尾部按 `[SerialOffset=0x46][CookedIndex=-1][SerialSize=28]` 三元组唯一定位 `SerialSize` |
@@ -336,7 +588,7 @@
 ## 下一步第一条命令
 
 ```powershell
-# 全量回归（改任何东西之后都要跑；21 场景 / 约 200 s / 走出厂 exe）
+# 全量回归（改任何东西之后都要跑；29 场景 / 约 250 s / 走出厂 exe）
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\run_regression.ps1
 
 # GUI 三条（API / 桌面壳 / 出厂 exe）

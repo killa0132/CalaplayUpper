@@ -4,6 +4,7 @@
     build_srcm.ps1 -Paks <game Paks dir> -Srcm <material root>
                    [-Fit cover|contain] [-Force] [-DryRun] [-Combined]
                    [-Ffmpeg <ffmpeg.exe>] [-Kit <dir>] [-NoDeploy] [-KeepWork]
+                   [-NoThumb] [-NoAtlas]
 
 Exit codes: 0 = ok, 2 = bad arguments, 3 = build failed (see build.log).
 """
@@ -59,6 +60,17 @@ def parse_args(argv=None):
                    help="folder holding retoc / da-patch / tex-inspect / mappings")
     p.add_argument("-KeepWork", "--keep-work", action="store_true",
                    help="keep the previous build tree for debugging")
+    p.add_argument("-NoThumb", "--no-thumb", action="store_true",
+                   help="do NOT author the preview material instances (each new background "
+                        "row then keeps the clone source's @30, i.e. the in-game thumbnail "
+                        "stays the native tile, exactly like v1). Diagnostic switch: the "
+                        "default authors one MI per background so the thumbnail is correct.")
+    p.add_argument("-NoAtlas", "--no-atlas", action="store_true",
+                   help="do NOT append the preview atlas: keep the CP-36 whole-image preview MI "
+                        "(SourceTexture = our 2K texture, sprite = the whole frame). The dropdown "
+                        "chip stays 2K, but the timeline cell and the side preview show native "
+                        "atlas tile 0,0 again. Diagnostic switch: the default gives every "
+                        "background its own cell on the game's own preview grid.")
     p.add_argument("-Log", "--log", default=None, metavar="FILE",
                    help="log file path (default: <srcm parent>\\build.log)")
     p.add_argument("-Quiet", "--quiet", action="store_true", help="do not echo the log")
@@ -77,7 +89,8 @@ def main(argv=None) -> int:
 
     ctx = Ctx(paks_arg=a.paks, srcm_arg=srcm, fit=a.fit, force=a.force,
               dry_run=bool(a.dry_run or a.no_deploy), combined=a.combined,
-              ffmpeg=a.ffmpeg, kit_dir=a.kit, keep_work=a.keep_work)
+              ffmpeg=a.ffmpeg, kit_dir=a.kit, keep_work=a.keep_work,
+              no_thumb=bool(a.no_thumb), no_atlas=bool(a.no_atlas))
     log = Log(path=log_path, echo=not a.quiet)
     b = Builder(ctx, log)
     ok = False

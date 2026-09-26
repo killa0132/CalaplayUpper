@@ -18,6 +18,10 @@ personal study and entertainment only.
 * **One-click packing**: organise your material, press the button, get a game patch
 * **Safe, no pollution**: every change is loaded as a patch — the game's original files are never overwritten
 * **Roll back any time**: not happy? One-click uninstall puts the game back the way it was
+* **Your own thumbnails** (new in v1.1.0): the little preview next to each background entry is generated
+  per background, so it shows *your* picture instead of the game's original tile
+* **No more stretching** (new in v1.1.0): portrait / square pictures are refused with a clear message,
+  every landscape picture is accepted
 * **Bilingual UI**: switch between 中文 and English on the fly
 * **First-run guide**: nine guided steps the first time you open it
 * **Desktop GUI**: no command line — just double-click the exe
@@ -49,7 +53,7 @@ my-material/
 └── Ambient/   <- ambience (scene atmosphere)
 ```
 
-* Images: 1080p or better; PNG, JPG and JPEG are supported.
+* Images: **2560×1440 (ideal - nothing gets resampled)** or larger; PNG, JPG and JPEG are supported.
 * Audio: **WAV is the safest**; MP3 needs the Full build or a local FFmpeg.
 
 (The four folder names are **case-insensitive**, and a missing one is simply skipped.)
@@ -112,7 +116,30 @@ The UI has a few options; beginners can ignore them.
 | Combined | Append to the previous build instead of starting over |
 | Force | Force the build when the material exceeds the default limits |
 
-Default limits: ≤ 50 backgrounds, ≤ 10 minutes of audio, image quality ≥ 25 dB.
+Default limits: ≤ 59 backgrounds, ≤ 10 minutes of audio, image quality ≥ 25 dB.
+
+## 🧭 Known limitations
+
+* The **timeline cell** and the editor's right-hand **“Background” preview block** now **do show a
+  background you added** (since v1.1.0).
+  * How (static, no resident injection): each new background's 250×141 thumbnail is **appended to the
+    game's own preview atlas `T_BackgroundPreviews`** (in the free cells at the end, index 165+), and
+    that background's preview material is pointed at that cell. The game itself hands the cell's
+    coordinates to both widgets.
+  * Because the atlas only has 59 free cells, the **background limit is 59** (`-Force` goes beyond it,
+    and the extra backgrounds' thumbnails will not show).
+* The **dropdown thumbnail gets slightly softer (about 30 %)**: due to the game's native rendering
+  path (that thumbnail samples only the single atlas cell, and the GPU's mip selection lands on a
+  blend of two levels) the little list thumbnail is a bit softer than before — **but not perceptible
+  to the eye**, and it is the reasonable trade for the timeline and the preview block finally showing
+  the right picture (`-NoAtlas` restores the old behaviour).
+* **Unaffected**: the dropdown list itself, the chapter cover on the main menu, and the
+  **background inside the game scene** — all of these show your own images.
+* The runtime workaround (R2 / `--refresh-backgrounds`) is **deprecated**: it needs Frida running
+  beside the game (heavy stutter), its effect is runtime-only, and the game's author confirmed the
+  engine entry point it uses is not the intended path. The current approach is the static atlas route
+  above (assessment: `docs/CP35_ATLAS_APPEND_ASSESSMENT.md`, design:
+  `docs/CP36_ATLAS_APPEND_DESIGN.md` and `docs/CP37_ATLAS_MI_STRATEGY_ASSESSMENT.md`).
 
 ## ⚠️ Things to know
 
@@ -123,6 +150,25 @@ Default limits: ≤ 50 backgrounds, ≤ 10 minutes of audio, image quality ≥ 2
 * Prefer **ASCII-only paths**. Avoid Chinese characters and special symbols in both the game
   folder and the material folder.
 * You need to own **CalaPlayer itself**. This tool only packs your material; it does not include the game.
+
+## 🆕 Changelog
+
+**v1.1.0 (2026-09-25)** — backward-compatible feature additions:
+
+* **Quality: backgrounds stay at 2560×1440** (route B). Background textures are no longer squashed to
+  1920×1080: the cooked texture is rebuilt wholesale, so a 2560×1440 source is **not resampled at all**
+  (measured PSNR 35.5 → 36.8 / 41.1 → 41.7 dB).
+* **Background thumbnails fixed**: the small preview next to each dropdown entry now renders *your*
+  picture (every new background gets its own preview material `MI_<name>`, wired to that row's preview
+  reference; append-only — native entries are never replaced). The `-NoThumb` switch restores the old
+  behaviour for diagnosis.
+* **Aspect-ratio policy (no stretching)**: anything wider than tall is accepted (non-16:9 gets a
+  warning); portrait and square pictures are **refused** with a clear message; pass `-Fit contain` to
+  have them centred on a 2560×1440 canvas with (18,18,22) bars.
+* The regression suite grew to 29 scenarios and a new gate A8 (thumbnail channel); A6 now reads the
+  rebuilt texture back **with a real UE parser** (size/format/12 mips/per-mip hashes).
+
+Full history: **[`CHANGELOG.md`](CHANGELOG.md)**.
 
 ## 📁 Project structure (developers)
 

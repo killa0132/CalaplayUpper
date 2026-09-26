@@ -36,7 +36,16 @@ _lock = threading.Lock()
 
 
 def app_dir() -> str:
-    """``%LOCALAPPDATA%\\CalaPlayerSrcmBuilder`` (same folder desktop.py cd's to)."""
+    """``%LOCALAPPDATA%\\CalaPlayerSrcmBuilder`` (same folder desktop.py cd's to).
+
+    ``CALA_PREFS_DIR`` overrides it.  The packaged self-test points that at a temp folder, because
+    it has to clear the onboarding flag to reproduce a genuine first run: restoring "what was there
+    before" is lossy when the user had no other settings yet, and the restore then DELETED the real
+    store -- so the next launch popped the guide again (reported 2026-09-26).
+    """
+    override = os.environ.get("CALA_PREFS_DIR")
+    if override:
+        return override
     base = os.path.join(os.environ.get("LOCALAPPDATA")
                         or os.path.expanduser("~"), "CalaPlayerSrcmBuilder")
     return base

@@ -238,6 +238,11 @@ onMounted(() => {
   // does survive the next launch (main.js has already loaded it before mount)
   const done = getPref(KEY) === '1'
   if (!done) {
+    //: remember that it has been SHOWN, not only that it was walked to the end:
+    //: if the window is simply closed while the guide is up (or the user ignores
+    //: it), the next launch must not nag again.  `restart()` (the "?" button)
+    //: still re-opens it on demand.
+    setPref(KEY, '1')
     visible.value = true
     autoOpened.value = true
     nextTick(() => { ready.value = true })

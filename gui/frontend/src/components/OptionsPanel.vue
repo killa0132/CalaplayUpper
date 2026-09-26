@@ -57,11 +57,11 @@ import ScrambleText from './ScrambleText.vue'
 import { t } from '../i18n.js'
 
 const props = defineProps({
-  fit: String, dryRun: Boolean, combined: Boolean, force: Boolean,
+  fit: String, dryRun: Boolean, combined: Boolean, force: Boolean, noAtlas: Boolean,
   ffmpeg: String, kit: String
 })
 const emit = defineEmits(['update:fit', 'update:dryRun', 'update:combined', 'update:force',
-                          'update:ffmpeg', 'update:kit'])
+                          'update:noAtlas', 'update:ffmpeg', 'update:kit'])
 
 const advOpen = ref(false)
 
@@ -70,6 +70,7 @@ const rows = computed(() => [
   { id: 'dryRun', domId: 'opt-dryrun', label: t('opts.dryRun'), hint: t('opts.dryRunHint') },
   { id: 'combined', domId: 'opt-combined', label: t('opts.combined'), hint: t('opts.combinedHint') },
   { id: 'force', domId: 'opt-force', label: t('opts.force'), hint: t('opts.forceHint') },
+  { id: 'noAtlas', domId: 'opt-noatlas', label: t('opts.noAtlas'), hint: t('opts.noAtlasHint') },
   { id: 'adv', domId: 'opt-adv', label: t('opts.adv'), hint: t('opts.advHint') }
 ])
 
@@ -77,6 +78,7 @@ function on(id) {
   if (id === 'dryRun') return !!props.dryRun
   if (id === 'combined') return !!props.combined
   if (id === 'force') return !!props.force
+  if (id === 'noAtlas') return !!props.noAtlas
   if (id === 'adv') return advOpen.value
   return true                       // the fit row always shows a value
 }
@@ -95,6 +97,7 @@ function onPick(item) {
   if (item.id === 'dryRun') emit('update:dryRun', !props.dryRun)
   else if (item.id === 'combined') emit('update:combined', !props.combined)
   else if (item.id === 'force') emit('update:force', !props.force)
+  else if (item.id === 'noAtlas') emit('update:noAtlas', !props.noAtlas)
   else if (item.id === 'adv') advOpen.value = !advOpen.value
   // 'fit' is driven by its own <select>
 }

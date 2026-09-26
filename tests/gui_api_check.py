@@ -143,11 +143,15 @@ def main() -> int:
     print("      %d log lines, %d events, %.1fs" % (len(lines), len(events), time.time() - t0))
     check(rep["done"] and rep["ok"], "the task finished ok (%s)" % (rep["error"] or "-"))
     gates = (rep["report"] or {}).get("gates", {})
-    check(set(gates) >= {"A0", "A1", "A2", "A3", "A4", "A5", "A6", "A7"} and
-          all(g["ok"] for g in gates.values()), "A0~A7 all present and PASS")
+    check(set(gates) >= {"A0", "A1", "A2", "A3", "A4", "A5", "A6", "A7", "A8"} and
+          all(g["ok"] for g in gates.values()), "A0~A8 all present and PASS")
     check((rep["report"] or {}).get("deployed") is False, "dry run did not deploy")
     check(any("QUALITY:" in l for l in lines), "SSE carried the QUALITY line")
     check(any("GATE] A5" in l for l in lines), "SSE carried the gate lines")
+    # CP-34: the two new user-facing messages must reach the GUI log panel, which
+    # is fed by the very same `Log` sink that writes the CLI's build.log.
+    check(any("非 16:9" in l for l in lines), "SSE carried the aspect-ratio warning")
+    check(any("preview MI MI_" in l for l in lines), "SSE carried the preview-MI line")
     seen = {"L0", "L1", "L2", "L3", "L4"}
     check(seen <= stages, "SSE emitted a stage event for each of L0~L4 (got %s)"
           % ",".join(sorted(x for x in stages if x)))

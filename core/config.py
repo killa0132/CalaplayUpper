@@ -71,18 +71,78 @@ KIND_DA: Dict[str, str] = {
 IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".bmp", ".tga", ".webp", ".tif", ".tiff", ".gif")
 AUDIO_EXTS = (".wav", ".mp3", ".flac", ".ogg", ".m4a", ".aac", ".wma", ".opus", ".aiff", ".aif")
 
-TARGET_W, TARGET_H = 1920, 1080
+# ---------------------------------------------------------------------------
+# Target canvas (CP-35 route B, user ruling 2026-09-25: "我选路线 B（保持 2560×1440 分辨率，
+# 继续用 DXT1）…按"整块重建 uexp"的规范实现").
+#
+# Route B means the cooked Texture2D is no longer a same-length patch of the 1920x1080 shell: the
+# whole .uexp is rebuilt at 2560x1440 (12 BC1 mips) and the uasset's SerialSize is fixed up.  The
+# preview MI's six scalars below therefore follow TARGET_W/TARGET_H automatically - if they were
+# left at 1920x1080 the thumbnail's sprite window would be wrong.
+# ---------------------------------------------------------------------------
+TARGET_W, TARGET_H = 2560, 1440
+TARGET_PIXEL_FORMAT = "PF_DXT1"
 LETTERBOX_RGB = (18, 18, 22)
 
 # --------------------------------------------------------------------------
-# limits (user ruling 2026-09-23): bg <= 50, audio total <= 10 min, -Force overrides
+# background aspect-ratio policy (user ruling 2026-09-25)
+#
+# The game samples a background through a *fixed* sprite (the preview MI's SpriteWidth/Height are
+# baked in), and the community measured what that does to the wrong shape: a source that is not
+# landscape comes out **stretched** inside the game.  So the tool refuses to silently "fix" such a
+# picture:
+#
+#   landscape (w > h)              -> accepted; 16:9 is ideal, any other wide
+#                                     ratio is accepted *with a warning*
+#   square    (|w-h| ~ 0)          -> rejected unless -Fit contain is given
+#   portrait  (w < h)              -> rejected unless -Fit contain is given
+#
+# With -Fit contain the picture is centred on a TARGET_W x TARGET_H canvas padded with
+# LETTERBOX_RGB, which keeps the geometry intact (that is the opt-in escape).
+# --------------------------------------------------------------------------
+SQUARE_SLACK = 0.02          # |w - h| within 2 % of the height counts as square
+SQUARE_SLACK_MIN_PX = 2
+RATIO_TOLERANCE = 0.01       # 16:9 within 1 % -> "is 16:9", no warning
+
+
+def aspect_kind(w: int, h: int) -> str:
+    """"landscape" | "square" | "portrait" for an image of size w x h."""
+    if w <= 0 or h <= 0:
+        raise BuildError("L0", "image has a degenerate size: %dx%d" % (w, h))
+    if w < h:
+        return "portrait"
+    if abs(w - h) <= max(SQUARE_SLACK_MIN_PX, int(round(SQUARE_SLACK * h))):
+        return "square"
+    return "landscape"
+
+
+def is_16_9(w: int, h: int) -> bool:
+    return abs((float(w) / float(h)) - (16.0 / 9.0)) <= RATIO_TOLERANCE
+
+
+#: shown when a non-landscape picture is refused (kept verbatim: it is what the
+#: user asked the tool to tell them, and the regression asserts on it).
+ASPECT_REJECT_HINT = (
+    "本工具目前仅支持宽屏图片（宽 > 高，推荐 16:9），请自行裁剪或加黑边转换为 16:9"
+    "（如 2560x1440）；也可以加 -Fit contain 让本工具居中补 (18,18,22) 黑边到 2560x1440。\n"
+    "      this tool only supports landscape pictures (w > h, 16:9 recommended): crop or "
+    "letterbox it yourself, or pass -Fit contain to have it centred on a 2560x1440 canvas."
+)
+
+# --------------------------------------------------------------------------
+# limits (user ruling 2026-09-23, background cap re-ruled 2026-09-26): bg <= 59,
+# audio total <= 10 min, -Force overrides.
+#
+# The background cap is 59 because that is exactly how many free preview-atlas cells the game
+# itself has (16x14 grid, 165 occupied -> index 165..223, see ATLAS_* below); a background beyond
+# that has no cell to preview in, so it needs -Force and its thumbnail will not show.
 #
 # The three accessors below are the ONLY place the limits are read from.
 # They honour optional environment overrides so the regression harness can
 # exercise the limit / -Force code paths with tiny material instead of
-# generating 51 full-size backgrounds (see tests/regression.py).
+# generating 60 full-size backgrounds (see tests/regression.py).
 # --------------------------------------------------------------------------
-MAX_BG = 50
+MAX_BG = 59
 MAX_AUDIO_SECONDS = 600.0
 MAX_CONTAINER_MB = 2048.0        # sanity stop before we produce a monster container
 MIN_PSNR_DB = 25.0               # image quality gate (never silently pass a broken encoder)
@@ -114,6 +174,85 @@ def limit_min_psnr() -> float:
 AUDIO_RATE = 48000
 AUDIO_BITS = 16
 AUDIO_MAX_CH = 2
+
+# --------------------------------------------------------------------------
+# background thumbnails -- one cloned material instance per new background
+#
+# A `DA_Backgrounds` row has two independent reference channels:
+#     +10  soft object path -> our texture   (drives the BIG preview and PLAY)
+#     +30  FPackageIndex    -> a preview MI  (drives the dropdown thumbnail and
+#                                            the little side preview)
+# The preview MI is a `UMaterialInstanceConstant` whose parent is
+# `MMI_BackgroundSelector` and whose `SourceTexture` parameter points at the
+# texture it renders.  v1 inherited `@30` from the clone source, i.e. it stayed
+# on a *native* MI pointing into the shared atlas `T_BackgroundPreviews` -- that
+# is exactly why the thumbnail kept showing the native tile.
+#
+# From CP-34 on we author one MI per new background:
+#     object/package : MI_<name>  in the same folder as the MI shell we clone
+#     Parent         : untouched (MMI_BackgroundSelector)
+#     SourceTexture  : our /Game/.../Backgrounds/<name>
+#     Sprite*        : 0,0,1920,1080   (the sprite the game samples)  [1920 was pre-route-B]
+#     Texture*       : 1920,1080       (our normalised texture)
+#     isSelected     : 0               (only when the shell carries it)
+# and point the appended DA row's `@30` at it.  The DA ImportMap grows by 2
+# imports per MI and is **append-only, never reordered** -- the existing 333
+# indices must keep their exact meaning (a fabricated `@30` Fatal-crashed the
+# game once: `Bad import index 166/333`).
+#
+# ⚠️ CP-37 (2026-09-26) changed that shape.  Measured: the DA row's `@30` feeds **three** consumers
+# (the dropdown chip is a MID *of* that MI; the right-hand preview block and the timeline cell are
+# MIDs of the game's own `MMI_BackgroundPreview` / `MMI_SubslotContentBackground` and only receive
+# its `SpriteX/SpriteY`).  So the MI must be **native shaped**:
+#     SourceTexture  : the game's atlas T_BackgroundPreviews  (kept from the shell, no import added)
+#     SpriteX/SpriteY: our cell origin  (index 165+ on the game's own grid)
+#     SpriteWidth/Height=250/141, TextureWidth/Height=4096/2048
+# The 2K texture stays referenced by the DA row's `Background` soft pointer (PLAY / menu card).
+# The chip renders at 163x92 (measured), so a 250x141 atlas cell is plenty - see
+# docs/CP37_ATLAS_MI_STRATEGY_ASSESSMENT.md.
+# --------------------------------------------------------------------------
+MI_OBJ_PREFIX = "MI_"
+MI_SCALARS: Dict[str, float] = {
+    "SpriteX": 0.0,
+    "SpriteY": 0.0,
+    "SpriteWidth": float(TARGET_W),
+    "SpriteHeight": float(TARGET_H),
+    "TextureWidth": float(TARGET_W),
+    "TextureHeight": float(TARGET_H),
+    "isSelected": 0.0,
+}
+#: the parent material every background preview MI must belong to
+MI_PARENT_FRAGMENT = "MMI_BackgroundSelector"
+
+# --------------------------------------------------------------------------
+# CP-37 preview atlas (the game's own preview grid).
+#
+# `T_BackgroundPreviews` is 4096x2048 / PF_DXT1 / 13 inline mips; the game lays thumbnails out on
+# a 250x141 cell with a 252x143 stride and occupies index 0..164 (rows 0..9 + row 10 cols 0..4).
+# Index 165..223 are free -> that is where our tiles go, so the game's own coordinate arithmetic
+# (`SpriteX = col*252`, `SpriteY = row*143`) lands on them.
+# --------------------------------------------------------------------------
+ATLAS_PKG = "/Game/CalaPlayer/UI/EditorUI/Textures/T_BackgroundPreviews"
+ATLAS_OBJ = "T_BackgroundPreviews"
+ATLAS_CELL_W, ATLAS_CELL_H = 250, 141
+ATLAS_STRIDE_X, ATLAS_STRIDE_Y = 252, 143
+ATLAS_COLS, ATLAS_ROWS = 16, 14
+ATLAS_SLOTS = ATLAS_COLS * ATLAS_ROWS
+ATLAS_FIRST_CELL = 165                    # == the game's occupied count (measured)
+ATLAS_MAX_CELLS = ATLAS_SLOTS - ATLAS_FIRST_CELL      # 59
+
+
+def atlas_cell_xy(index: int):
+    """The game's own grid formula for cell `index`."""
+    return (index % ATLAS_COLS) * ATLAS_STRIDE_X, (index // ATLAS_COLS) * ATLAS_STRIDE_Y
+
+
+def mi_scalars_atlas(index: int) -> Dict[str, float]:
+    """The native MI shape for our cell: coordinates + the atlas' sprite/texture geometry."""
+    x, y = atlas_cell_xy(index)
+    return {"SpriteX": float(x), "SpriteY": float(y),
+            "SpriteWidth": float(ATLAS_CELL_W), "SpriteHeight": float(ATLAS_CELL_H),
+            "TextureWidth": 4096.0, "TextureHeight": 2048.0}
 
 OUT_PATCH_DIRNAME = "out_patch"
 

@@ -7,6 +7,7 @@ using System.Security.Cryptography;
 using UAssetAPI;
 using UAssetAPI.ExportTypes;
 using UAssetAPI.PropertyTypes.Objects;
+using UAssetAPI.PropertyTypes.Structs;
 using UAssetAPI.UnrealTypes;
 using UAssetAPI.Unversioned;
 
@@ -242,7 +243,14 @@ if (mode == "props")
     }
     foreach (var pd in ((NormalExport)asset.Exports[0]).Data)
     {
-        if (pd is not MapPropertyData mpd) { Console.WriteLine($"SKIP non-map prop {pd.Name} ({pd.GetType().Name})"); continue; }
+        if (pd is not MapPropertyData mpd)
+        {
+            // 非 Map 属性也要能看：MI 的 TextureParameterValues / ScalarParameterValues
+            // 就藏在这里面（ObjectPropertyData 的 FPackageIndex + FloatPropertyData）。
+            Console.WriteLine($"PROP {pd.Name} ({pd.GetType().Name})");
+            DumpObj(pd, "  ", 0);
+            continue;
+        }
         Console.WriteLine($"MAP {Show(mpd.Name)} KeyType={Show(mpd.KeyType)} ValueType={Show(mpd.ValueType)}");
         DumpObj(mpd.Value, "  ", 0);
     }
@@ -520,6 +528,392 @@ if (mode == "sndmap")
     asset.Write(op);
     foreach (var f in Directory.GetFiles(od).OrderBy(x => x))
         Console.WriteLine($"  out {Path.GetFileName(f)} {new FileInfo(f).Length} B sha={Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(f)))[..16]}");
+    return 0;
+}
+
+// ---------------------------------------------------------------------------
+// ImportMap 手术共用件（mimk / bgref 都用）
+//   原则：**只追加、不重排**；template 一律从本资产已有的原生 import 里克隆，
+//   连字段组合（ClassPackage/ClassName/PackageName/bImportOptional）都照抄，
+//   以免手搓出来的 Import 与引擎预期不一致。FName / FPackageIndex 必须换成
+//   新对象，否则改克隆体会把原生 import 一起改掉（MemberwiseClone 是浅克隆）。
+// ---------------------------------------------------------------------------
+static object? _GetM(object o, string name)
+{
+    var t = o.GetType();
+    var f = t.GetField(name, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+    if (f is not null) return f.GetValue(o);
+    var p = t.GetProperty(name, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+    if (p is not null && p.GetIndexParameters().Length == 0) return p.GetValue(o);
+    return null;
+}
+
+static void _SetM(object o, string name, object? v)
+{
+    var t = o.GetType();
+    var f = t.GetField(name, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+    if (f is not null) { f.SetValue(o, v); return; }
+    var p = t.GetProperty(name, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+    if (p is not null && p.CanWrite) { p.SetValue(o, v); return; }
+    throw new InvalidOperationException("cannot set " + t.Name + "." + name);
+}
+
+static object _Shallow(object o) =>
+    typeof(object).GetMethod("MemberwiseClone", BindingFlags.NonPublic | BindingFlags.Instance)!
+        .Invoke(o, null)!;
+
+static string _FNameText(object? fn) => fn is null ? "" : (_GetM(fn, "Value")?.ToString() ?? "");
+
+static FPackageIndex _IdxLike(object proto, int v)
+{
+    // 克隆一个已有的 FPackageIndex 再改 Index：不走 ctor，避免 trim 掉私有构造。
+    var o = (FPackageIndex)_Shallow(proto);
+    typeof(FPackageIndex).GetField("Index")!.SetValue(o, v);
+    return o;
+}
+
+static System.Collections.IList _ImportList(UAsset a, string label)
+{
+    var list = a.Imports as System.Collections.IList;
+    if (list is null || list.IsFixedSize)
+    {
+        var copy = new List<Import>(a.Imports);
+        _SetM(a, "Imports", copy);
+        list = copy;
+        Console.WriteLine($"  ({label}) asset.Imports was not a growable IList -> replaced by List<Import>");
+    }
+    return list;
+}
+
+/// 在 DA / MI 的 ImportMap 末尾追加「一个包引用」：Package + 对象，返回对象 import 的下标。
+/// pkgTemplate / objTemplate 是本资产里已有的原生成对 import（保证字段形状一致）。
+static int _AppendPackageRef(UAsset a, System.Collections.IList imports,
+                             object pkgTemplate, object objTemplate,
+                             string pkgPath, string objName, string label)
+{
+    a.AddNameReference(new FString(pkgPath), false, false);
+    a.AddNameReference(new FString(objName), false, false);
+    var pkgIdx = imports.Count;
+    var objIdx = pkgIdx + 1;
+
+    var newPkg = _Shallow(pkgTemplate);
+    _SetM(newPkg, "ObjectName", new FName(a, pkgPath, 0));
+    var newObj = _Shallow(objTemplate);
+    _SetM(newObj, "ObjectName", new FName(a, objName, 0));
+    _SetM(newObj, "OuterIndex", _IdxLike(_GetM(objTemplate, "OuterIndex")!, -(pkgIdx + 1)));
+
+    imports.Add(newPkg);
+    imports.Add(newObj);
+    Console.WriteLine($"  import[{pkgIdx}] Package {pkgPath}");
+    Console.WriteLine($"  import[{objIdx}] {_FNameText(_GetM(newObj, "ClassName"))} {objName} "
+                      + $"outer={-(pkgIdx + 1)}  -> FPackageIndex {-(objIdx + 1)}");
+    return objIdx;
+}
+
+if (mode == "mimk")
+{
+    // mimk <miShell.uasset> <usmap> <outDir> <newObjectName> <newPackagePath>
+    //      <texturePackagePath> <textureObjectName> [ParamName=Value ...]
+    //   克隆一个背景预览 MI（UMaterialInstanceConstant）：
+    //     * 内部身份三处一起改（FolderName + 名字表包路径 + export ObjectName）
+    //     * 在本 MI 自己的 ImportMap 末尾追加 2 条 import（Package + Texture2D）
+    //     * 把 TextureParameterValues 里的对象引用重指到我们的贴图包（缩略图的真源）
+    //     * 按名字改标量参数（SpriteWidth/SpriteHeight/TextureWidth/TextureHeight/SpriteX/Y...）
+    if (args.Length < 8)
+    {
+        Console.Error.WriteLine("usage: da-patch mimk <mi.uasset> <usmap> <outDir> <newObj> "
+                                + "<newPkg> <texPkg> <texObj> [Name=Value ...]");
+        return 2;
+    }
+    var miNewObj = args[4];
+    var miNewPkg = args[5];
+    var texPkg = args[6];
+    var texObj = args[7];
+    var wantScalars = new Dictionary<string, float>(StringComparer.OrdinalIgnoreCase);
+    for (var i = 8; i < args.Length; i++)
+    {
+        var kv = args[i].Split(new[] { '=' }, 2);
+        if (kv.Length != 2) { Console.Error.WriteLine($"FATAL: bad parameter spec '{args[i]}'"); return 2; }
+        wantScalars[kv[0]] = float.Parse(kv[1], System.Globalization.CultureInfo.InvariantCulture);
+    }
+
+    var neMi = (NormalExport)asset.Exports[0];
+    var importsMi = _ImportList(asset, "mimk");
+    // CP-37: passing "-" as the texture means "keep the shell's own TextureParameterValues".
+    // The native preview MI shells already point SourceTexture at the game's preview atlas, and the
+    // atlas route must NOT append a second import pair for it: our MI then keeps exactly the native
+    // shape and the only semantic change is SpriteX/SpriteY (the two scalars the game copies into the
+    // right-hand preview block and the timeline cell).  Any other value keeps the CP-34 behaviour.
+    var keepTex = texPkg == "-" || texObj == "-";
+
+    object? pkgTemplate = null, objTemplate = null;
+    var objTemplateIdx = -1;
+    for (var i = 0; i < importsMi.Count; i++)
+    {
+        var im = importsMi[i]!;
+        var outer = _GetM(im, "OuterIndex");
+        var oi = outer is null ? 0 : Convert.ToInt32(_GetM(outer, "Index"));
+        if (_FNameText(_GetM(im, "ClassName")) == "Texture2D" && oi < 0)
+        {
+            objTemplate = im;
+            objTemplateIdx = i;
+            pkgTemplate = importsMi[-oi - 1];
+        }
+    }
+    if (objTemplate is null || pkgTemplate is null)
+    {
+        Console.Error.WriteLine("FATAL: this MI has no (Package -> Texture2D) import pair to clone");
+        return 5;
+    }
+    Console.WriteLine($"  templates: pkg='{_FNameText(_GetM(pkgTemplate, "ObjectName"))}' "
+                      + $"obj='{_FNameText(_GetM(objTemplate, "ObjectName"))}'");
+    int texObjIdx;
+    if (keepTex)
+    {
+        texPkg = _FNameText(_GetM(pkgTemplate, "ObjectName"));
+        texObj = _FNameText(_GetM(objTemplate, "ObjectName"));
+        texObjIdx = objTemplateIdx;
+        Console.WriteLine($"  keep-tex: SourceTexture stays on the shell's own import[{texObjIdx}] "
+                          + $"{texPkg}/{texObj} (no import appended)");
+    }
+    else
+    {
+        texObjIdx = _AppendPackageRef(asset, importsMi, pkgTemplate, objTemplate, texPkg, texObj, "mimk");
+    }
+    var texRef = -(texObjIdx + 1);
+
+    PropertyData? tpv = null, spv = null;
+    foreach (var pd in neMi.Data)
+    {
+        if (pd.Name.ToString() == "TextureParameterValues") tpv = pd;
+        else if (pd.Name.ToString() == "ScalarParameterValues") spv = pd;
+    }
+    if (tpv is null) { Console.Error.WriteLine("FATAL: no TextureParameterValues on this MI"); return 6; }
+
+    void Flatten(PropertyData pd, List<PropertyData> acc)
+    {
+        acc.Add(pd);
+        if (pd is ArrayPropertyData ap && ap.Value != null)
+            foreach (var e in ap.Value) Flatten(e, acc);
+        if (pd is StructPropertyData spx && spx.Value != null)
+            foreach (var e in spx.Value) Flatten(e, acc);
+    }
+
+    var flatT = new List<PropertyData>();
+    Flatten(tpv, flatT);
+    var objRefs = flatT.OfType<ObjectPropertyData>().ToList();
+    Console.WriteLine($"  TextureParameterValues: {objRefs.Count} object reference(s) -> {texRef}");
+    if (objRefs.Count == 0)
+    {
+        Console.Error.WriteLine("FATAL: no ObjectPropertyData inside TextureParameterValues");
+        return 7;
+    }
+    foreach (var op in objRefs)
+    {
+        var cur = op.Value is null ? 0 : Convert.ToInt32(_GetM(op.Value, "Index"));
+        Console.WriteLine($"    {op.Name} was {cur} -> {texRef}");
+        if (keepTex)
+        {
+            if (cur != texRef)
+            {
+                Console.Error.WriteLine($"FATAL: -keep-tex but {op.Name} points at import {cur}, "
+                                        + $"expected the shell's own {texRef}");
+                return 9;
+            }
+        }
+        else
+        {
+            op.Value = _IdxLike(op.Value ?? _GetM(objTemplate, "OuterIndex")!, texRef);
+        }
+    }
+
+    var setDone = new List<string>();
+    var kept = new List<string>();
+    if (spv is ArrayPropertyData spa && spa.Value != null)
+    {
+        foreach (var el in spa.Value)
+        {
+            var fx = new List<PropertyData>();
+            Flatten(el, fx);
+            var nmProp = fx.OfType<NamePropertyData>().FirstOrDefault();
+            var flProp = fx.OfType<FloatPropertyData>().FirstOrDefault();
+            if (nmProp is null || flProp is null)
+            {
+                Console.WriteLine("    (unparsed scalar element: "
+                                  + string.Join(",", fx.Select(x => x.GetType().Name + ":" + x.Name)) + ")");
+                continue;
+            }
+            var pname = nmProp.Value.ToString();
+            if (wantScalars.TryGetValue(pname, out var v))
+            {
+                Console.WriteLine($"    scalar {pname}: {flProp.Value} -> {v}");
+                flProp.Value = v;
+                setDone.Add(pname);
+            }
+            else
+            {
+                Console.WriteLine($"    scalar {pname}: {flProp.Value} (kept)");
+                kept.Add(pname);
+            }
+        }
+    }
+    var absent = wantScalars.Keys.Where(k => !setDone.Contains(k, StringComparer.OrdinalIgnoreCase)).ToList();
+    Console.WriteLine($"  scalars set=[{string.Join(",", setDone)}] absent=[{string.Join(",", absent)}] "
+                      + $"kept=[{string.Join(",", kept)}]");
+
+    // ---- 内部身份：FolderName + 名字表包路径条目 + export ObjectName
+    var nmList = asset.GetNameMapIndexList();
+    var frag = Path.GetFileNameWithoutExtension(ua);
+    var hits = Enumerable.Range(0, nmList.Count)
+        .Where(i => nmList[i] != null && nmList[i].Value != null && nmList[i].Value.StartsWith("/Game/")
+                    && nmList[i].Value.EndsWith("/" + frag)).ToList();
+    Console.WriteLine($"  old package-path name entries (/Game/.../{frag}): [{string.Join(",", hits)}]");
+    if (hits.Count != 1)
+    {
+        Console.Error.WriteLine("FATAL: expected exactly one old package-path entry in the MI");
+        return 8;
+    }
+    object? nmObj = null;
+    foreach (var f in asset.GetType().GetFields(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance))
+        if (f.FieldType == typeof(List<FString>)) { nmObj = f.GetValue(asset); break; }
+    if (nmObj is null)
+        foreach (var p in asset.GetType().GetProperties(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance))
+            if (p.PropertyType == typeof(List<FString>) && p.GetIndexParameters().Length == 0)
+            { nmObj = p.GetValue(asset); break; }
+    if (nmObj is null) { Console.Error.WriteLine("FATAL: cannot find a mutable List<FString> name map"); return 4; }
+    Console.WriteLine($"  name[{hits[0]}] '{((List<FString>)nmObj)[hits[0]]}' -> '{miNewPkg}'");
+    ((List<FString>)nmObj)[hits[0]] = new FString(miNewPkg);
+    Console.WriteLine($"  FolderName '{asset.FolderName}' -> '{miNewPkg}'");
+    asset.FolderName = new FString(miNewPkg);
+    Console.WriteLine($"  export '{asset.Exports[0].ObjectName}' -> '{miNewObj}'");
+    asset.Exports[0].ObjectName = new FName(asset, miNewObj, 0);
+
+    var odMi = Path.GetFullPath(args[3]);
+    Directory.CreateDirectory(odMi);
+    var opMi = Path.Combine(odMi, miNewObj + ".uasset");
+    asset.Write(opMi);
+    foreach (var f in Directory.GetFiles(odMi).OrderBy(x => x))
+        Console.WriteLine($"  out {Path.GetFileName(f)} {new FileInfo(f).Length} B "
+                          + $"sha={Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(f)))[..16]}");
+    Console.WriteLine($"MIMK_OK obj={miNewObj} pkg={miNewPkg} tex={texPkg}/{texObj} texRef={texRef} "
+                      + $"imports={importsMi.Count} scalars={string.Join(",", setDone)} "
+                      + $"absent={string.Join(",", absent)}");
+    return 0;
+}
+
+if (mode == "bgref")
+{
+    // bgref <da.uasset> <usmap> <outDir> <miPackagePath> <miObjectName>
+    //   在 DA_Backgrounds 的 ImportMap **末尾追加 2 条**（Package + MaterialInstanceConstant），
+    //   打印该 MI 对象的 FPackageIndex（负值）供 python 写进新行的 @30。
+    //   既有 333 条 import 的下标与字节完全不变（只追加不重排）。
+    if (args.Length < 6)
+    {
+        Console.Error.WriteLine("usage: da-patch bgref <da.uasset> <usmap> <outDir> <miPkg> <miObj>");
+        return 2;
+    }
+    var miPkg = args[4];
+    var miObj = args[5];
+    var importsDa = _ImportList(asset, "bgref");
+
+    object? pkgTemplate = null, objTemplate = null;
+    for (var i = 0; i < importsDa.Count; i++)
+    {
+        var im = importsDa[i]!;
+        var outer = _GetM(im, "OuterIndex");
+        var oi = outer is null ? 0 : Convert.ToInt32(_GetM(outer, "Index"));
+        if (_FNameText(_GetM(im, "ClassName")) == "MaterialInstanceConstant" && oi < 0)
+        {
+            objTemplate = im;
+            pkgTemplate = importsDa[-oi - 1];
+            break;
+        }
+    }
+    if (objTemplate is null || pkgTemplate is null)
+    {
+        Console.Error.WriteLine("FATAL: this DA has no (Package -> MaterialInstanceConstant) pair to clone");
+        return 5;
+    }
+    Console.WriteLine($"  templates: pkg='{_FNameText(_GetM(pkgTemplate, "ObjectName"))}' "
+                      + $"obj='{_FNameText(_GetM(objTemplate, "ObjectName"))}'");
+    var beforeImports = importsDa.Count;
+    var objIdxNew = _AppendPackageRef(asset, importsDa, pkgTemplate, objTemplate, miPkg, miObj, "bgref");
+
+    var odDa = Path.GetFullPath(args[3]);
+    Directory.CreateDirectory(odDa);
+    var opDa = Path.Combine(odDa, Path.GetFileName(ua));
+    asset.Write(opDa);
+    foreach (var f in Directory.GetFiles(odDa).OrderBy(x => x))
+        Console.WriteLine($"  out {Path.GetFileName(f)} {new FileInfo(f).Length} B "
+                          + $"sha={Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(f)))[..16]}");
+    Console.WriteLine($"BGREF_OK ref={-(objIdxNew + 1)} imports={beforeImports}->{importsDa.Count} "
+                      + $"pkg='{miPkg}' obj='{miObj}'");
+    return 0;
+}
+
+if (mode == "miprobe")
+{
+    // miprobe <mi.uasset> <usmap>
+    //   机器可读地打印这个 MI 的**渲染真值**：Parent / SourceTexture（参数名 + FPackageIndex
+    //   + 解析到的 import）/ 全部标量参数值。判据用它，而不是"看起来像"。
+    var neMp = (NormalExport)asset.Exports[0];
+
+    string ResolveRef(object? idxObj)
+    {
+        if (idxObj is null) return "null";
+        var raw = Convert.ToInt32(_GetM(idxObj, "Index"));
+        if (raw >= 0) return $"export[{raw}]";
+        var i = -raw - 1;
+        if (i < 0 || i >= asset.Imports.Count) return $"import[{i}] OUT-OF-RANGE(={asset.Imports.Count})";
+        var im = asset.Imports[i];
+        return $"import[{i}] {_FNameText(_GetM(im, "ClassPackage"))}."
+               + $"{_FNameText(_GetM(im, "ClassName"))} {_FNameText(_GetM(im, "ObjectName"))}";
+    }
+
+    void FlattenMp(PropertyData pd, List<PropertyData> acc)
+    {
+        acc.Add(pd);
+        if (pd is ArrayPropertyData ap && ap.Value != null)
+            foreach (var e in ap.Value) FlattenMp(e, acc);
+        if (pd is StructPropertyData spx && spx.Value != null)
+            foreach (var e in spx.Value) FlattenMp(e, acc);
+    }
+
+    Console.WriteLine($"MIPROBE export={asset.Exports[0].ObjectName} props={neMp.Data.Count} "
+                      + $"imports={asset.Imports.Count} names={asset.GetNameMapIndexList().Count}");
+    Console.WriteLine($"MIPROBE classIndex={asset.Exports[0].ClassIndex} -> "
+                      + $"{ResolveRef(asset.Exports[0].ClassIndex)}");
+    Console.WriteLine($"MIPROBE folder={asset.FolderName}");
+    foreach (var pd in neMp.Data)
+    {
+        var pname = pd.Name.ToString();
+        if (pname == "Parent" && pd is ObjectPropertyData pop)
+            Console.WriteLine($"MIPROBE parent ref={pop.Value} -> {ResolveRef(pop.Value)}");
+        else if (pname is "TextureParameterValues" or "ScalarParameterValues")
+        {
+            var arr = pd as ArrayPropertyData;
+            var n = arr?.Value?.Length ?? 0;
+            Console.WriteLine($"MIPROBE {pname} count={n}");
+            for (var k = 0; k < n; k++)
+            {
+                var fx = new List<PropertyData>();
+                FlattenMp(arr!.Value![k], fx);
+                var np = fx.OfType<NamePropertyData>().FirstOrDefault();
+                var who = np is null ? "?" : np.Value.ToString();
+                if (pname == "ScalarParameterValues")
+                {
+                    var fp = fx.OfType<FloatPropertyData>().FirstOrDefault();
+                    Console.WriteLine($"MIPROBE scalar name={who} value={(fp is null ? "?" : fp.Value.ToString(System.Globalization.CultureInfo.InvariantCulture))}");
+                }
+                else
+                {
+                    var op = fx.OfType<ObjectPropertyData>().FirstOrDefault();
+                    Console.WriteLine($"MIPROBE texture name={who} ref={op?.Value} -> {ResolveRef(op?.Value)}");
+                }
+            }
+        }
+    }
+    Console.WriteLine("MIPROBE_OK");
     return 0;
 }
 

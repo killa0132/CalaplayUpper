@@ -157,7 +157,8 @@ def _run(task: Task) -> None:
     ctx = Ctx(paks_arg=p["paks"], srcm_arg=srcm,
               fit=p.get("fit", "cover"), force=bool(p.get("force")),
               dry_run=bool(p.get("dry_run")), combined=bool(p.get("combined")),
-              ffmpeg=p.get("ffmpeg") or None, kit_dir=p.get("kit") or None)
+              ffmpeg=p.get("ffmpeg") or None, kit_dir=p.get("kit") or None,
+              no_thumb=bool(p.get("no_thumb")), no_atlas=bool(p.get("no_atlas")))
     log = CancelableLog(path=log_path, echo=False, cancel=task.cancel)
     log.add_sink(task.push)
     b = Builder(ctx, log)

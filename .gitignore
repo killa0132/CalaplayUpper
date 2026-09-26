@@ -49,6 +49,15 @@ kit/
 out_patch/
 build.log
 build_report.json
+# the CLI also writes this one (note: a dot, not an underscore)
+build.report.json
+
+# CP-34 / CP-35 one-off experiment workspaces (big, machine specific)
+work_cp34/
+work_cp35/
+
+# CP-35 R2 before/after screenshots (R2 retired 2026-09-26; kept locally only)
+docs/cp35_live/
 
 # ---- tests: scratch material and the sandbox ----------------------------
 # tests/fakegame is HARD-LINKED TO THE REAL GAME (858 MB .ucas = the game's own
