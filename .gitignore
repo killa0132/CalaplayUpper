@@ -75,3 +75,16 @@ logs/
 *.user
 Thumbs.db
 desktop.ini
+
+# ---- internal working notes (never published) ---------------------------
+# Cross-session working state / trap table for the AI workflow: a local file,
+# not documentation for users.  Kept on disk, never committed.
+AGENTS.md
+
+# ---- the two GUI theme backgrounds --------------------------------------
+# The publishable copies live in gui/frontend/public/ (tracked there, vite copies
+# them into gui/dist).  The copies at the PROJECT ROOT are local build inputs for
+# build_gui.ps1 only; the patterns are anchored so the public ones stay tracked.
+/bg_light.jpg
+/bg_dark.jpg
+

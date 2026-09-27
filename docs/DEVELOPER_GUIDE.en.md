@@ -5,7 +5,8 @@
 >
 > It covers: CLI switches and the 30-second start, the safety model, the A0~A7
 > gates, why it works this way, sizes, each GUI round, and the dev/debug guide.
-> Cross-session working rules and current state live in AGENTS.md.
+> Cross-session working rules and current state live in a local `AGENTS.md`
+> (**internal notes, deliberately not part of this repository**).
 
 ---
 
@@ -227,7 +228,8 @@ bg_light.jpg     light-theme background (copied into gui/frontend/public/ at bui
 bg_dark.jpg      dark-theme background (same)
 .vscode/         recommended editor setup (extensions / settings / debug configs)
 .gitignore       what stays out of the repo, and why
-AGENTS.md        cross-session working rules + current state + trap table (for AI help)
+AGENTS.md        cross-session working rules + current state + trap table
+                 (**internal notes, kept locally -- not in this repository**)
 README.md        the Chinese original (cross-linked at the top)
 ```
 

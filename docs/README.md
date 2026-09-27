@@ -4,7 +4,7 @@
 > 与 **`README.en.md`**（英文版）。
 > **开发与参考文档** = 本目录的 **`DEVELOPER_GUIDE.md`**（原 README 全文移过来的）与
 > **`DEVELOPER_GUIDE.en.md`**。
-> 跨会话的开工规则与当前状态在 **`AGENTS.md`**。
+> 跨会话的开工规则与当前状态在本地 `AGENTS.md`（**内部工作笔记，不进仓库**）。
 
 ## 先看哪一份
 
@@ -13,7 +13,7 @@
 | 这工具是干什么的、怎么下载、怎么用 | `..\README.md`（英文 `..\README.en.md`） |
 | CLI 开关、A0~A7 判据、原理、体积 | `.\DEVELOPER_GUIDE.md` |
 | 界面每个文件是干什么的、怎么起开发服务器 | `.\DEVELOPER_GUIDE.md` §5 与 §12 |
-| 跨会话续做要遵守什么、当前进度到哪 | `..\AGENTS.md` |
+| 跨会话续做要遵守什么、当前进度到哪 | 本地 `AGENTS.md`（**内部笔记，不在仓库里**） |
 | 每次改完要跑哪些验证 | `.\DEVELOPER_GUIDE.md` §12.3 |
 | 想把自己的 Mod 和别人**共存**（不互相覆盖） | `.\MOD_MERGE_PROTOCOL.md` |
 

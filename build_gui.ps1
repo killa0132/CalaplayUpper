@@ -15,11 +15,20 @@ $out  = Join-Path $here "build_out\gui"
 $dist = Join-Path $here "dist"
 
 Write-Host "=== 1/6 sync the UI art + the two background images ==="
+# The publishable copies live in gui\frontend\public (tracked, shipped to users).
+# A copy at the project root is only a LOCAL build input (it is gitignored), so a
+# fresh clone builds fine from the public copies alone.
 foreach ($bg in @("bg_light.jpg", "bg_dark.jpg")) {
     $src = Join-Path $here $bg
-    if (-not (Test-Path $src)) { throw "missing $bg at the project root ($src)" }
-    Copy-Item $src (Join-Path $fe "public\$bg") -Force
-    Write-Host ("  {0,-14} {1:N0} B" -f $bg, (Get-Item $src).Length)
+    $pub = Join-Path $fe "public\$bg"
+    if (Test-Path $src) {
+        Copy-Item $src $pub -Force
+        Write-Host ("  {0,-14} {1:N0} B  (root -> public)" -f $bg, (Get-Item $pub).Length)
+    } elseif (Test-Path $pub) {
+        Write-Host ("  {0,-14} {1:N0} B  (already in gui\frontend\public)" -f $bg, (Get-Item $pub).Length)
+    } else {
+        throw "missing $bg -- put it in gui\frontend\public\ or at the project root"
+    }
 }
 # The page art is looked up in gui\frontend\public (vite copies it into gui\dist,
 # which is wiped on every build).  gui\dist is also accepted as a drop folder so
