@@ -913,8 +913,8 @@ kit / ffmpeg 探测都是 exe / `_MEIPASS` 路径，与 CWD 无关），`build_g
   原因是**游戏原生蓝图不响应**这两个位置——**连游戏自带的背景也不显示在上面**（只读活进程探针 C1 定案）。
   不受影响：下拉缩略图（CP-34 已修好）、主菜单章节封面、游戏画面里的背景本体。
   运行时补救方案（R2）已废弃（严重卡顿 + 重启失效 + 作者确认原语不对），
-  现行路线 = **静态追加预览图集 `T_BackgroundPreviews`**，只读评估见
-  [`CP35_ATLAS_APPEND_ASSESSMENT.md`](CP35_ATLAS_APPEND_ASSESSMENT.md)。
+  现行路线 = **静态追加预览图集 `T_BackgroundPreviews`**（做法见 §3.3 与 §3.4；早期那份只读评估文档
+  `CP35_ATLAS_APPEND_ASSESSMENT.md` 已归档，不在本仓库内）。
 * ⚠️ **`-Combined` 目前在"再加一张背景"时不可用**（2026-09-26 实测，**待修**）：
   `-Combined` 会把上一轮**已经追加过行**的 `DA_Backgrounds` 当基线，而 `da-patch bgref`/`addname`
   走 UAssetAPI 重新序列化整包，在这个基线上会让 **uexp 多出 34 B（一整行）而行计数不变**

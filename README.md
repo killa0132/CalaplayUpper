@@ -144,9 +144,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1
   **但肉眼无感**，这是换取时间轴与预览块完整显示的合理妥协（`-NoAtlas` 可回到旧行为）。
 * **不受影响**：背景下拉列表的内容、主菜单里的章节封面、以及**游戏画面里的背景本体**，都正常显示你自己的图。
 * 曾经尝试的运行时补救方案（R2 / `--refresh-backgrounds`）**已废弃**：需要 Frida 常驻，会引发严重卡顿，
-  而且效果重启即失效；游戏作者也确认所用的引擎接口不是预期路径。现行方案是上面的静态图集路线
-  （评估见 `docs/CP35_ATLAS_APPEND_ASSESSMENT.md`、设计见 `docs/CP36_ATLAS_APPEND_DESIGN.md`
-  与 `docs/CP37_ATLAS_MI_STRATEGY_ASSESSMENT.md`）。
+  而且效果重启即失效；游戏作者也确认所用的引擎接口不是预期路径。现行方案就是上面的静态图集路线，
+  实现细节见 [`docs/DEVELOPER_GUIDE.md`](docs/DEVELOPER_GUIDE.md)（早期那份只读评估/设计文档已归档，
+  不在本仓库内）。
 
 ## ⚠️ 注意事项
 

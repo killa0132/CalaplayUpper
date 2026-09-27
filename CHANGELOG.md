@@ -218,8 +218,8 @@
 
 * **时间轴单元格 / 编辑器右侧 Background 预览块不显示新增背景** —— 游戏原生蓝图不响应这两个位置
   （连游戏自带背景也不显示）。下拉缩略图、主菜单封面、游戏画面背景本体不受影响。
-  运行时补救方案（R2）已废弃；现行路线 = 静态追加预览图集，只读评估见
-  [`docs/CP35_ATLAS_APPEND_ASSESSMENT.md`](docs/CP35_ATLAS_APPEND_ASSESSMENT.md)。
+  运行时补救方案（R2）已废弃；现行路线 = 静态追加预览图集（做法见 `docs/DEVELOPER_GUIDE.md` §3.3/§3.4；
+  早期那份只读评估文档 `CP35_ATLAS_APPEND_ASSESSMENT.md` 已归档，不在仓库内）。
 * **`-Combined` 不能在上一轮**已有背景**的基础上再加背景**：`da-patch bgref`/`addname` 在
   "已追加过行的 `DA_Backgrounds`"上会让 uexp 多出 34 B 而行计数不变，L3 的 trailer 门会拒绝构建
   （**失败是安全的**：游戏目录零写入、上一轮状态自动还原）。绕行 = 换个新 `out_patch` 做全新构建，

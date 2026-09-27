@@ -169,8 +169,9 @@ The field-level protocol (for mod authors) is in
 * The runtime workaround (R2 / `--refresh-backgrounds`) is **deprecated**: it needs Frida running
   beside the game (heavy stutter), its effect is runtime-only, and the game's author confirmed the
   engine entry point it uses is not the intended path. The current approach is the static atlas route
-  above (assessment: `docs/CP35_ATLAS_APPEND_ASSESSMENT.md`, design:
-  `docs/CP36_ATLAS_APPEND_DESIGN.md` and `docs/CP37_ATLAS_MI_STRATEGY_ASSESSMENT.md`).
+  above; the implementation details are in [`docs/DEVELOPER_GUIDE.md`](docs/DEVELOPER_GUIDE.md)
+  (the early read-only assessment / design documents have been archived and are not part of this
+  repository).
 
 ## ⚠️ Things to know
 
