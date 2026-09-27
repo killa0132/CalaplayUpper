@@ -35,6 +35,9 @@ from gui import no_window  # noqa: E402
 from gui import prefs  # noqa: E402
 
 TITLE = "CalaPlayerSrcmBuilder"
+#: 补丁容器的基名（与 core/config.py::PATCH_SUFFIX、scripts/install_merged.ps1 一致）。
+#: 自检用它判断"有没有装、装的是不是刚构建的那份"。
+PKG_BASE = "CalaPlayer-Windows" + "_P"
 
 #: fixed backend port in --dev so gui/frontend/vite.config.js can proxy /api to it
 DEV_PORT = 8756
@@ -227,6 +230,7 @@ PROGRESS_JS = ("(function(){try{"
                "trackH:tr?Math.round(tr.height):0,"
                "headCY:hr?Math.round(hr.top+hr.height/2):0,"
                "trackCY:tr?Math.round(tr.top+tr.height/2):0,"
+               "barH:Math.round(b.getBoundingClientRect().height),"
                "barCY:Math.round(b.getBoundingClientRect().top+b.getBoundingClientRect().height/2),"
                "trackLeft:tr?Math.round(tr.left):null,"
                "headSrc:h?(h.getAttribute('src')||''):'',"
@@ -870,7 +874,13 @@ HUB_JS = ("(function(){try{"
           "iconBox:ic?Math.round(ic.getBoundingClientRect().width):0,"
           "actsDisplay:acts?getComputedStyle(acts).display:'',"
           "actCols:acts?getComputedStyle(acts).gridTemplateColumns:'',"
-          "btnRows:Object.keys(rows).length,btnW:bs.map(function(b){return b.w;}),"
+          "btnRows:Object.keys(rows).length,"
+          # 同一行的按钮，`getBoundingClientRect().top` 会因为对话框的分数高度差 1px 而
+          # 取整到不同的值 —— 所以"几行"按 4px 分桶统计（真掉到第三行会差 ~40px）
+          "btnTopBuckets:(function(){var s={};bs.forEach(function(b){s[Math.round(b.y/4)]=1;});"
+          "return Object.keys(s).length;})(),"
+          "btnTops:bs.map(function(b){return b.y;}),"
+          "btnW:bs.map(function(b){return b.w;}),"
           "btnIds:bs.map(function(b){return b.id;}),"
           "scroll:card?{sw:card.scrollWidth,cw:card.clientWidth,"
           "sh:card.scrollHeight,ch:card.clientHeight,ox:getComputedStyle(card).overflowX}:null,"
@@ -940,6 +950,506 @@ LEFTW_JS = ("(function(){try{"
             "colW:Math.round(l.getBoundingClientRect().width),"
             "colClientW:l.clientWidth,colOffsetW:l.offsetWidth});"
             "}catch(e){return JSON.stringify({err:String(e)});}})()")
+
+
+def _selftest_mods_dir() -> str:
+    """A throwaway Mods root for the merge-mode check.
+
+    Only the *index* manifest is read by the page (`/api/mods`) and only the index
+    is what the checklist is built from, so this needs no cooked assets at all --
+    the check stays fast and independent of the regression fixtures.
+    """
+    d = os.path.join(tempfile.gettempdir(), "cala-selftest-mods")
+    os.makedirs(d, exist_ok=True)
+    for folder, name, kind in (("ModA_src", "ModA", "da_edit"),
+                               ("ModB_src", "ModB", "ui_text")):
+        os.makedirs(os.path.join(d, folder), exist_ok=True)
+        with open(os.path.join(d, folder, "manifest.json"), "w", encoding="utf-8") as fh:
+            json.dump({"name": name, "folder": folder, "kind": kind,
+                       "targets": {}, "files": []}, fh, ensure_ascii=False)
+    with open(os.path.join(d, "manifest.json"), "w", encoding="utf-8") as fh:
+        json.dump({"mods": [{"name": "ModA", "manifest": "ModA_src/manifest.json"},
+                            {"name": "ModB", "manifest": "ModB_src/manifest.json"}]},
+                  fh, ensure_ascii=False)
+    return d
+
+
+#: CP-38: the local single/merge switch.  Vue patches the DOM on the NEXT tick, so
+#: the mode change and the DOM read cannot live in one JS call -- the driver below
+#: changes the mode, sleeps, then reads.  These read the merge variant of the
+#: inputs card and exercise the checklist (untick / remove).
+MERGE_READ_JS = ("(function(){try{"
+                 "var c=window.__cala,q=function(s){return document.querySelector(s)};"
+                 "var ids=function(){return Array.prototype.map.call("
+                 "document.querySelectorAll('.uv-ls-item'),function(li){return li.id});};"
+                 "var o={};"
+                 "o.merge={mode:c.getMode(),hasSrcm:!!q('#srcm'),hasPaks:!!q('#paks'),"
+                 "hasBase:!!q('#paks-merge'),hasMods:!!q('#mods'),hasList:!!q('#mods-list'),"
+                 "hasPick:!!q('#pick-mods'),hasOut:!!q('#out-merge'),"
+                 "run:(q('#run')||{}).textContent.trim(),optRows:ids()};"
+                 "o.listRows=document.querySelectorAll('.mod-row').length;"
+                 "o.checked=Array.prototype.filter.call(document.querySelectorAll('.mod-check'),"
+                 "function(b){return b.checked}).length;"
+                 "o.clipped=Array.prototype.filter.call("
+                 "document.querySelectorAll('.mod-row .mod-name'),function(n){"
+                 "return n.scrollWidth>n.clientWidth+1}).length;"
+                 "var card=q('#card-inputs'),col=q('.grid > .col.left');"
+                 "o.widths={card:card?Math.round(card.getBoundingClientRect().width):0,"
+                 "col:col?col.clientWidth:0,overflow:card?card.scrollWidth-card.clientWidth:0};"
+                 "c.toggleMod(0,false);"
+                 "o.afterUncheck=c.mods().map(function(m){return m.name+':'+(m.on?'on':'off')});"
+                 "c.removeMod(0);"
+                 "o.afterRemove=c.mods().map(function(m){return m.name+':'+(m.on?'on':'off')});"
+                 "return JSON.stringify(o);"
+                 "}catch(e){return JSON.stringify({err:String(e)});}})()")
+
+#: read the card again after switching back to single (must be the original one)
+MERGE_BACK_JS = ("(function(){try{"
+                 "var c=window.__cala,q=function(s){return document.querySelector(s)};"
+                 "return JSON.stringify({mode:c.getMode(),hasSrcm:!!q('#srcm'),"
+                 "hasPaks:!!q('#paks'),hasMods:!!q('#mods'),"
+                 "run:(q('#run')||{}).textContent.trim(),"
+                 "optRows:Array.prototype.map.call(document.querySelectorAll('.uv-ls-item'),"
+                 "function(li){return li.id})});"
+                 "}catch(e){return JSON.stringify({err:String(e)});}})()")
+
+#: the same card at the minimum window size (960x620 -> a 330 px column)
+MERGE_MIN_JS = ("(function(){try{"
+                "var c=window.__cala,q=function(s){return document.querySelector(s)};"
+                "var card=q('#card-inputs'),col=q('.grid > .col.left');"
+                "var n=document.querySelectorAll('.mod-row .mod-name');"
+                "return JSON.stringify({mode:c.getMode(),"
+                "card:card?Math.round(card.getBoundingClientRect().width):0,"
+                "col:col?col.clientWidth:0,"
+                "cardOverflow:card?card.scrollWidth-card.clientWidth:0,"
+                "rows:n.length,clipped:Array.prototype.filter.call(n,function(x){"
+                "return x.scrollWidth>x.clientWidth+1}).length,"
+                "tabs:document.querySelectorAll('#mode-tabs .uv-btn').length,"
+                "tabClipped:Array.prototype.filter.call("
+                "document.querySelectorAll('#mode-tabs .uv-btn'),function(b){"
+                "return b.scrollWidth>b.clientWidth+1}).length});"
+                "}catch(e){return JSON.stringify({err:String(e)});}})()")
+
+
+#: CP-40: the run/cancel row must never spill out of the form column.  The old
+#: flex row could not shrink below its content, so at 960x620 the primary button
+#: poked over the column's right edge (invisible to the page, visible to the user).
+RUNBAR_JS = ("(function(){try{"
+             "var c=window.__cala,q=function(s){return document.querySelector(s)};"
+             "var col=q('.grid > .col.left'),bar=q('.runbar'),"
+             "run=q('#run'),can=q('#cancel'),card=q('#card-inputs');"
+             "if(!col||!run)return JSON.stringify({err:'no runbar'});"
+             "var cr=col.getBoundingClientRect(),rr=run.getBoundingClientRect(),"
+             "nr=can?can.getBoundingClientRect():null,br=bar?bar.getBoundingClientRect():null;"
+             "return JSON.stringify({mode:c.getMode(),"
+             "colL:Math.round(cr.left),colR:Math.round(cr.right),colW:col.clientWidth,"
+             "runL:Math.round(rr.left),runR:Math.round(rr.right),"
+             "runW:Math.round(rr.width),"
+             "canR:nr?Math.round(nr.right):null,canW:nr?Math.round(nr.width):0,"
+             "barR:br?Math.round(br.right):null,"
+             "barRows:bar?bar.getClientRects().length:0,"
+             "spill:Math.round(Math.max(rr.right,(nr?nr.right:0),(br?br.right:0))-cr.right),"
+             "colOverflow:col.scrollWidth-col.clientWidth,"
+             "cardW:card?Math.round(card.getBoundingClientRect().width):0,"
+             "label:run.textContent.trim()});"
+             "}catch(e){return JSON.stringify({err:String(e)});}})()")
+
+#: CP-40: the protocol's hard rule must read as a rule: gold + bold + a badge
+STRICT_JS = ("(function(){try{"
+             "var q=function(s){return document.querySelector(s)};"
+             "var row=q('#opt-strict'),hint=row?row.querySelector('.lab i'):null,"
+             "mark=q('#strict-mark'),sw=q('#sw-strict');"
+             "if(!row)return JSON.stringify({err:'no strict row'});"
+             "var st=hint?getComputedStyle(hint):null,mr=mark?mark.getBoundingClientRect():null;"
+             "return JSON.stringify({hint:hint?hint.textContent.trim():'',"
+             "color:st?st.color:'',weight:st?st.fontWeight:'',"
+             "hasMark:!!mark,markW:mr?Math.round(mr.width):0,markText:mark?mark.textContent.trim():'',"
+             # 这一行自己不许有开关（合并模式另有「仅产出不安装」那一行，它才算开关）
+             "ruleSwitches:row.querySelectorAll('.uv-switch').length,"
+             "switches:document.querySelectorAll('#card-options .uv-switch').length});"
+             "}catch(e){return JSON.stringify({err:String(e)});}})()")
+
+#: CP-40: -ExportSrc is an ordinary single-mode option row (and its switch flips).
+#: NOTE the id: OptionsPanel renders `id="sw-<row.id>"`, and the row id keeps its
+#: camelCase (`sw-dryRun` does too) -- ids are case sensitive in the DOM.
+EXPORTSRC_JS = ("(function(){try{"
+                "var c=window.__cala,q=function(s){return document.querySelector(s)};"
+                "var row=q('#opt-exportsrc'),sw=q('#sw-exportSrc'),"
+                "lab=row?row.querySelector('.uv-ls-label b'):null;"
+                "if(!row)return JSON.stringify({err:'no -ExportSrc row'});"
+                "if(!sw)return JSON.stringify({err:'no switch',rowFound:true,"
+                "ids:Array.prototype.map.call(row.querySelectorAll('[id]'),"
+                "function(e){return e.id})});"
+                "var on0=sw.classList.contains('on'),r=sw.getBoundingClientRect(),"
+                "b0=c.getParams().exportSrc;"
+                "c.setParams({exportSrc:true});"
+                "return JSON.stringify({mode:c.getMode(),label:lab?lab.textContent.trim():'',"
+                "trunc:lab?lab.scrollWidth>lab.clientWidth+1:null,"
+                "h:lab?Math.round(lab.getBoundingClientRect().height):0,"
+                "onBefore:on0,swW:Math.round(r.width),"
+                "before:b0});"
+                "}catch(e){return JSON.stringify({err:String(e)});}})()")
+
+EXPORTSRC_READ_JS = ("(function(){try{var c=window.__cala,"
+                     "sw=document.querySelector('#sw-exportSrc');"
+                     "if(!sw)return JSON.stringify({err:'no switch'});"
+                     "return JSON.stringify({onAfter:sw.classList.contains('on'),"
+                     "after:c.getParams().exportSrc});"
+                     "}catch(e){return JSON.stringify({err:String(e)});}})()")
+
+#: CP-40: the pre-flight card.  `run()` must refuse with a LIST of concrete problems
+#: instead of starting a task -- and the outcome modal must NOT be the thing that
+#: shows up.  Vue re-renders async, so dispatch and read are separate calls with a
+#: settle sleep in between (see _probe_merge_mode).
+#: CP-41: 第一个参数是模式（`single` / `merge`）—— 单包模式现在也用同一张卡片。
+NOTICE_DISPATCH_JS = ("(function(){try{"
+                      "var c=window.__cala;"
+                      "c.setMode(%s);c.setParams(%s);c.reset();"
+                      "c.run();"
+                      "return JSON.stringify({dispatched:true,mode:c.getMode()});"
+                      "}catch(e){return JSON.stringify({err:String(e)});}})()")
+
+NOTICE_READ_JS = ("(function(){try{"
+                  "var c=window.__cala,q=function(s){return document.querySelector(s)};"
+                  "var card=q('#notice-card'),list=q('#notice-errors'),art=q('.notice-art');"
+                  "var texts=[];"
+                  "if(list)Array.prototype.forEach.call(list.children,function(li){"
+                  "texts.push(li.textContent.replace(/\\s+/g,' ').trim())});"
+                  "var n=c.notice(),st=c.state();"
+                  "return JSON.stringify({visible:!!card,open:n.open,apiVisible:n.visible,"
+                  "lines:list?list.children.length:0,texts:texts,"
+                  "artSrc:art?(art.getAttribute('src')||''):'',"
+                  "artOk:art?(art.complete!==false&&art.naturalWidth>0):false,"
+                  "meow:(q('.uv-modal.notice .uv-modal-sub')||{}).textContent,"
+                  "okBtn:(q('#notice-ok')||{}).textContent,"
+                  "modal:c.modal(),running:st.running,"
+                  "mode:c.getMode()});"
+                  "}catch(e){return JSON.stringify({err:String(e)});}})()")
+
+
+def _probe_notice_card(js, params: dict, tag: str, mode: str = "merge") -> dict:
+    """CP-40/CP-41: fire the pre-flight with missing/wrong inputs and read the card."""
+    out_d: dict = {}
+    js(NOTICE_DISPATCH_JS % (json.dumps(mode), json.dumps(params)))
+    time.sleep(1.1)
+    out_d["read"] = js(NOTICE_READ_JS) or {}
+    out_d["shot"] = _grab(tag)
+    js("window.__cala.closeNotice()")
+    time.sleep(0.6)
+    out_d["closed"] = js(NOTICE_READ_JS) or {}
+    return out_d
+
+
+#: CP-41：合并模式的「仅产出不安装」——默认**关闭**（= 合并后自动装进游戏）
+MERGEDRY_JS = ("(function(){try{"
+               "var c=window.__cala,q=function(s){return document.querySelector(s)};"
+               "var row=q('#opt-mergedry'),sw=q('#sw-mergeDryRun');"
+               "if(!row)return JSON.stringify({err:'no 仅产出不安装 row'});"
+               "if(!sw)return JSON.stringify({err:'no switch',rowFound:true});"
+               "var off0=!sw.classList.contains('on'),v0=c.getParams().mergeDryRun;"
+               "c.setParams({mergeDryRun:true});"
+               "return JSON.stringify({mode:c.getMode(),offByDefault:off0,formBefore:v0,"
+               "label:(row.querySelector('.uv-ls-label b')||{}).textContent,"
+               "hint:(row.querySelector('.lab i')||{}).textContent,"
+               "rows:Array.prototype.map.call(document.querySelectorAll('.uv-ls-item'),"
+               "function(li){return li.id})});"
+               "}catch(e){return JSON.stringify({err:String(e)});}})()")
+
+MERGEDRY_READ_JS = ("(function(){try{var c=window.__cala,"
+                    "sw=document.querySelector('#sw-mergeDryRun');"
+                    "if(!sw)return JSON.stringify({err:'no switch'});"
+                    "return JSON.stringify({onAfter:sw.classList.contains('on'),"
+                    "formAfter:c.getParams().mergeDryRun});"
+                    "}catch(e){return JSON.stringify({err:String(e)});}})()")
+
+#: CP-41：合并 → **自动安装** → 成功弹窗。真正的端到端（不是"元素存在"）。
+#: 先把勾选清单清空：`runMerge()` 只有在清单为空时才会按 `form.mods` 重新嗅探 ——
+#: 否则会拿上一次（自检夹具 ModA/ModB）的勾选去校验，直接被"勾选的 Mod 不在目录里"拦下。
+MERGE_DEPLOY_DISPATCH_JS = ("(function(){try{"
+                            "var c=window.__cala;"
+                            "c.setMode('merge');c.setMods([]);"
+                            "c.setParams(%s);c.reset();"
+                            "c.run();"
+                            "return JSON.stringify({dispatched:true,mode:c.getMode()});"
+                            "}catch(e){return JSON.stringify({err:String(e)});}})()")
+
+#: 弹窗的**副标题**（"已安装到游戏"那句在这里，不在标题里）+ 判据面板的安装信息块
+MODAL_SUB_JS = ("(function(){try{var m=document.querySelector('.uv-modal');"
+                "if(!m)return JSON.stringify({open:false});"
+                "var s=m.querySelector('.uv-modal-sub'),t=m.querySelector('.uv-modal-text'),"
+                "bd=m.closest('.uv-modal-backdrop'),d=document.getElementById('deploy-box');"
+                "return JSON.stringify({open:true,"
+                "kind:bd?bd.getAttribute('data-kind'):'',"
+                "title:t?t.textContent.trim():'',sub:s?s.textContent.trim():'',"
+                "deployBox:d?d.textContent.replace(/\\s+/g,' ').trim():''});"
+                "}catch(e){return JSON.stringify({err:String(e)});}})()")
+
+#: CP-41：引导为了把高亮拉进视口会自己滚左栏 —— 退出时必须回到原位
+GUIDE_SCROLL_JS = ("(function(){try{"
+                   "var c=window.__cala,q=function(s){return document.querySelector(s)};"
+                   "var left=q('.grid > .col.left');"
+                   "var st=c.onboard.state();"
+                   "var hole=st.hole;"
+                   "return JSON.stringify({open:st.visible,step:st.step,"
+                   "leftTop:left?Math.round(left.scrollTop):null,"
+                   "leftMax:left?Math.round(left.scrollHeight-left.clientHeight):0,"
+                   "saved:st.scrollSaved,"
+                   "holeTop:hole?hole.y:null,"
+                   "holeBottom:hole?(hole.y+hole.h):null,"
+                   "vh:window.innerHeight,"
+                   "inView:hole?(hole.y>=0&&(hole.y+hole.h)<=window.innerHeight):null});"
+                   "}catch(e){return JSON.stringify({err:String(e)});}})()")
+
+#: CP-41：语言自动嗅探（清掉 cala-lang 后重载 ⇒ 应当按系统语言来，而不是写死中文）
+LANG_STATE_JS = ("(function(){try{"
+                 "var c=window.__cala;"
+                 "var nav=String(navigator.language||navigator.userLanguage||'');"
+                 "var tok=new URLSearchParams(location.search).get('t')||'';"
+                 "var x=new XMLHttpRequest();x.open('GET','/api/prefs?t='+tok,false);x.send();"
+                 "var p=JSON.parse(x.responseText).prefs||{};"
+                 "return JSON.stringify({lang:c.lang(),"
+                 "htmlLang:document.documentElement.getAttribute('lang'),"
+                 "nav:nav,storedLang:p['cala-lang']||null,"
+                 "expect:nav.toLowerCase().indexOf('zh')===0?'zh':'en'});"
+                 "}catch(e){return JSON.stringify({err:String(e)});}})()")
+
+
+def _paks_dir(paks: str) -> str:
+    """把「游戏根目录 / Content 目录 / Paks 目录本身」都归一成真正的 Paks 目录。
+
+    与 `core/config.py::discover_game` 同一套判断，但只做路径推导（不读容器）。
+    """
+    for cand in (os.path.join(paks, "Content", "Paks"), paks,
+                 os.path.join(paks, "Paks")):
+        if os.path.isdir(cand) and (
+                os.path.isfile(os.path.join(cand, "CalaPlayer-Windows.utoc"))
+                or os.path.isfile(os.path.join(cand, PKG_BASE + ".utoc"))):
+            return cand
+    return os.path.join(paks, "Content", "Paks") if os.path.isdir(
+        os.path.join(paks, "Content", "Paks")) else paks
+
+
+def _report_over_http(port: int, task_id: str) -> dict:
+    """Read /api/report/<id> the same way the page does."""
+    import urllib.request
+    url = "http://127.0.0.1:%d/api/report/%s?t=%s" % (port, task_id, gui_app.TOKEN)
+    try:
+        with urllib.request.urlopen(url, timeout=30) as r:
+            return json.loads(r.read().decode("utf-8"))
+    except Exception as e:  # noqa: BLE001
+        return {"error": "%s: %s" % (type(e).__name__, e)}
+
+
+def _patch_snapshot(paks: str) -> dict:
+    """已装 `_P` 三件套的 `{文件名: sha16}`（一个都没装时是空字典）。"""
+    from core.common import sha256_file
+    out = {}
+    if not os.path.isdir(paks):
+        return out
+    for f in sorted(os.listdir(paks)):
+        if f.startswith(PKG_BASE + "."):
+            out[f] = sha256_file(os.path.join(paks, f))[:16]
+    return out
+
+#: CP-41b：右下角那颗「回滚」按钮。**它必须永远跟着结果出现**（没装就置灰），
+#: 因为曾经用 `v-if` 把它藏掉 —— 单包 DryRun（默认）下回滚入口整个消失了（用户报的回归）。
+ROLLBACK_BTN_JS = ("(function(){try{"
+                   "var c=window.__cala;"
+                   "var b=document.getElementById('rollback');"
+                   "var box=document.querySelector('#card-gates .acts');"
+                   "var txt=document.getElementById('rollback-text');"
+                   "var open=box?box.querySelector('button'):null;"
+                   "return JSON.stringify({exists:!!b,"
+                   "disabled:b?b.disabled:null,label:b?b.textContent.trim():'',"
+                   "title:b?(b.getAttribute('title')||''):'',"
+                   "openOut:open?open.textContent.trim():'',"
+                   "buttons:box?Array.prototype.map.call(box.querySelectorAll('button'),"
+                   "function(x){return {id:x.id,txt:x.textContent.trim(),dis:x.disabled}}):[],"
+                   "rollbackText:txt?txt.textContent.trim():'',"
+                   "deployed:c.state().deployed,running:c.state().running,"
+                   "mode:c.getMode()});"
+                   "}catch(e){return JSON.stringify({err:String(e)});}})()")
+
+#: 点那颗按钮（真实 click 事件，不是直接调 API）
+ROLLBACK_CLICK_JS = ("(function(){try{var b=document.getElementById('rollback');"
+                     "if(!b)return JSON.stringify({err:'no rollback button'});"
+                     "if(b.disabled)return JSON.stringify({err:'disabled'});"
+                     "b.click();return JSON.stringify({clicked:true});"
+                     "}catch(e){return JSON.stringify({err:String(e)});}})()")
+
+
+def _wait_rollback_text(js, wait_s: float = 90.0) -> str:
+    """等按钮回滚的结果文字出现（`uninstall.ps1` 要起一个 powershell，会慢一点）。"""
+    t0 = time.time()
+    txt = ""
+    while time.time() - t0 < wait_s:
+        st = js(ROLLBACK_BTN_JS) or {}
+        txt = st.get("rollbackText") or ""
+        if txt:
+            return txt
+        time.sleep(0.6)
+    return txt
+
+
+def _probe_single_rollback(js, port: int, paks_arg: str, paks: str, srcm: str,
+                           dry_state: dict) -> dict:
+    """CP-41b：单包**真打包**（关 DryRun）→ 点右下角「回滚」→ 沙箱回到打包前。
+
+    `dry_state` 是刚才那次 DryRun 之后读到的按钮状态（应当在、但置灰）。
+    """
+    out: dict = {"dry": dry_state, "before": _patch_snapshot(paks)}
+    js("window.__cala.reset();window.__cala.setParams(%s);window.__cala.run();"
+       % json.dumps({"paks": paks_arg, "srcm": srcm, "dryRun": False}))
+    t0 = time.time()
+    st = {}
+    while time.time() - t0 < 400:
+        st = js("JSON.stringify(window.__cala.state())") or {}
+        if st.get("running") is False and st.get("ok") is not None:
+            break
+        time.sleep(0.6)
+    out["state"] = st
+    out["seconds"] = round(time.time() - t0, 1)
+    time.sleep(0.8)
+    out["deployed_snapshot"] = _patch_snapshot(paks)
+    out["btn"] = js(ROLLBACK_BTN_JS) or {}
+    out["out_patch"] = st.get("taskId") and js(
+        "(function(){var t=window.__cala.state();return JSON.stringify({t:t.taskId});})()")
+    out["shot"] = _grab("rollback_single")
+    out["click"] = js(ROLLBACK_CLICK_JS) or {}
+    out["text"] = _wait_rollback_text(js)
+    time.sleep(0.5)
+    out["after"] = _patch_snapshot(paks)
+    out["btn_after"] = js(ROLLBACK_BTN_JS) or {}
+    return out
+
+
+def _probe_merge_deploy(js, port: int, fixture: str, paks: str, out_dir: str,
+                        wait_s: float = 240.0) -> dict:
+    """CP-41：在页面里真的走一次「开始合并」，把自动安装整条链走完并收回证据。
+
+    收回来的都是**真值**：任务的 ok/deployed、M0~M7 阶段、成功弹窗的副标题、
+    目标目录里 `_P.ucas` 的哈希、备份目录，以及回滚之后游戏目录是否回到原样。
+    """
+    out: dict = {"fixture": fixture, "out": out_dir}
+    before = _patch_snapshot(paks)
+    out["before"] = before
+    params = {"paks": paks, "mods": fixture, "out": out_dir, "mergeDryRun": False}
+    js(MERGE_DEPLOY_DISPATCH_JS % json.dumps(params))
+    t0 = time.time()
+    st = {}
+    shot_progress = ""
+    # 合并跑起来就抓一张（进度条 + M 阶段），比"等到 M3 再抓"可靠
+    time.sleep(1.6)
+    shot_progress = _grab("merge_progress")
+    while time.time() - t0 < wait_s:
+        st = js("JSON.stringify(window.__cala.state())") or {}
+        if not shot_progress and st.get("stage") in ("M3", "M4", "M5"):
+            shot_progress = _grab("merge_progress")
+        if st.get("running") is False and st.get("ok") is not None:
+            break
+        # 被合并前检查拦下时不干等 4 分钟
+        nt = js("JSON.stringify(window.__cala.notice())") or {}
+        if nt.get("open"):
+            out["notice"] = nt
+            break
+        time.sleep(0.7)
+    out["state"] = st
+    out["seconds"] = round(time.time() - t0, 1)
+    out["shot_progress"] = shot_progress
+    time.sleep(1.0)
+    out["modal"] = js(MODAL_SUB_JS) or {}
+    out["shot_ok"] = _grab("merge_ok")
+    out["task_id"] = st.get("taskId") or ""
+    if out["task_id"]:
+        rep = _report_over_http(port, out["task_id"])
+        out["report"] = rep
+        r = rep.get("report") or {}
+        out["deploy"] = r.get("deploy") or {}
+        out["container_ucas"] = (((r.get("container") or {}).get("files") or {})
+                                 .get("ucas") or {}).get("sha256")
+    out["after"] = _patch_snapshot(paks)
+    dep = out.get("deploy") or {}
+    if dep.get("backup"):
+        out["backup_dir"] = dep["backup"]
+        out["backup_txt_exists"] = os.path.isfile(dep.get("backup_txt") or "")
+        old = before.get(PKG_BASE + ".ucas")
+        try:
+            txt = open(dep["backup_txt"], encoding="utf-8", errors="replace").read()
+            out["backup_txt_has_old"] = bool(old and old in txt)
+        except OSError:
+            out["backup_txt_has_old"] = False
+    # CP-41b：回滚走**页面上那颗按钮**（不是直接调 API）——用户要求"能点击并正确执行"
+    out["btn"] = js(ROLLBACK_BTN_JS) or {}
+    out["click"] = js(ROLLBACK_CLICK_JS) or {}
+    out["rollback_text"] = _wait_rollback_text(js)
+    time.sleep(0.4)
+    out["after_rollback"] = _patch_snapshot(paks)
+    return out
+
+
+def _probe_guide_scroll(js) -> dict:
+    """CP-41：引导高亮会滚左栏，退出时必须回到原位。
+
+    做法是**先把左栏滚到底**，再跳到第 1 步（`#card-inputs`，在最上面）：引导必须
+    自己往上滚才能高亮它；`finish()` 之后滚动值要回到"滚到底"那个位置。这样
+    "滚了" 与 "回到原位" 两个判据都是确定的，不依赖窗口高度。
+    """
+    js("(function(){var l=document.querySelector('.grid > .col.left');"
+       "if(l)l.scrollTop=l.scrollHeight;return 'ok';})()")
+    time.sleep(0.4)
+    before = js(GUIDE_SCROLL_JS) or {}
+    js("window.__cala.onboard.restart(1)")
+    time.sleep(1.2)
+    during = js(GUIDE_SCROLL_JS) or {}
+    shot = _grab("guide_scroll")
+    js("window.__cala.onboard.finish()")
+    time.sleep(1.0)
+    after = js(GUIDE_SCROLL_JS) or {}
+    return {"before": before, "during": during, "after": after, "shot": shot}
+
+
+def _merge_fill_js(mdir: str) -> str:
+    """Synchronously list `<mdir>` through /api/mods and fill the page's checklist.
+
+    A sync XHR (not `api.listMods`, which returns a promise) so the probe can read
+    the resulting DOM in a later call instead of awaiting inside evaluate_js.
+    """
+    return ("(function(){var c=window.__cala;"
+            "var tok=new URLSearchParams(location.search).get('t')||'';"
+            "var x=new XMLHttpRequest();"
+            "x.open('GET','/api/mods?dir='+encodeURIComponent(%s)+'&t='+tok,false);x.send();"
+            "var d=JSON.parse(x.responseText);c.setParams({mods:%s});c.setMods(d.mods||[]);"
+            "return JSON.stringify({ok:d.ok,source:d.source,root:d.root,"
+            "names:(d.mods||[]).map(function(m){return m.name}),"
+            "kinds:(d.mods||[]).map(function(m){return m.kind})});})()"
+            % (json.dumps(mdir), json.dumps(mdir)))
+
+
+def _probe_merge_mode(js, mdir: str) -> dict:
+    """Drive the single -> merge -> single switch and collect the evidence.
+
+    Each mode change is followed by a settle sleep: Vue re-renders on the next
+    tick, so reading the DOM in the same JS turn would read the previous mode.
+    """
+    out: dict = {}
+    js("window.__cala.setMode('merge')")
+    time.sleep(0.7)
+    out["api"] = js(_merge_fill_js(mdir)) or {}
+    time.sleep(0.7)
+    out.update(js(MERGE_READ_JS) or {})
+    # CP-40: the protocol's hard rule + the run/cancel row, both read in merge mode
+    out["strict"] = js(STRICT_JS) or {}
+    out["runbar"] = js(RUNBAR_JS) or {}
+    # CP-41：合并模式的「仅产出不安装」（默认关闭 ⇒ 合并后自动装进游戏）
+    mdry = js(MERGEDRY_JS) or {}
+    time.sleep(0.5)
+    mdry.update(js(MERGEDRY_READ_JS) or {})
+    out["mergedry"] = mdry
+    js("window.__cala.setParams({mergeDryRun:false})")
+    js("window.__cala.setMode('single')")
+    time.sleep(0.7)
+    out["back"] = js(MERGE_BACK_JS) or {}
+    return out
 
 
 def _clipboard_get() -> str:
@@ -1042,6 +1552,9 @@ def main(argv=None) -> int:
                     help="also write every message here (needed for the no-console exe)")
     ap.add_argument("--paks", default=os.path.join(_ROOT, "tests", "fakegame"))
     ap.add_argument("--srcm", default=os.path.join(_ROOT, "tests", "mat", "demo"))
+    ap.add_argument("--merge-fixture", default=os.path.join(_ROOT, "tests", "mat", "merge", "ok"),
+                    help="CP-41: the Mods tree used by the 'merge -> auto install' probe "
+                         "(the exe cannot derive it: _ROOT is its unpack dir)")
     a = ap.parse_args(argv)
     # no console (double-click on the windowed exe) => sys.stdout is None; fix it
     # before anything can call .isatty() on it (uvicorn, pywebview, print)
@@ -1134,7 +1647,19 @@ def main(argv=None) -> int:
          # of the things that used to overlap or get squeezed
          "prefs_before": {}, "prefs_after": {}, "prefs_second": {}, "prefs_restored": {},
          "ob_second": {}, "reload_shot": "", "browse": {}, "reload_gen": {},
-         "join_scroll": {}, "gh_hover": {}, "leftw": {}, "shot_join_hover": ""}
+         "join_scroll": {}, "gh_hover": {}, "leftw": {}, "shot_join_hover": "",
+         # CP-38: the local single/merge switch
+         "modemerge": {}, "modemerge_min": {},
+         # CP-40: -ExportSrc, the pre-flight card, the button row and the bar frame
+         "exportsrc": {}, "notice_empty": {}, "notice_bad": {},
+         "runbar_wide": {}, "runbar_min": {}, "shot_notice": "", "shot_notice_bad": "",
+         "shot_merge_min": "",
+         # CP-41: 合并自动安装 / 单包错误卡片 / 引导滚动 / 语言嗅探
+         "notice_single": {}, "shot_notice_single": "",
+         "mergedeploy": {}, "guide_scroll": {},
+         "rollback_dry": {}, "rollback_single": {},
+         "lang_sniff": {}, "lang_persist": {}, "lang_after_reload": {},
+         "shot_lang_sniff": ""}
     window = webview.create_window(TITLE, url, width=1240, height=820,
                                    min_size=(960, 620), text_select=True)
     gui_app.WINDOW = window
@@ -1391,8 +1916,9 @@ def main(argv=None) -> int:
             R["clip_dry_bad"] = _copy_over_http(port, "", dry=1)
             # ... and put the user's clipboard back the way we found it
             R["clip_restored"] = None
+            R["clip_back"] = {}
             if R["clip_before"]:
-                _copy_over_http(port, R["clip_before"])
+                R["clip_back"] = _copy_over_http(port, R["clip_before"])
                 time.sleep(0.25)
                 R["clip_restored"] = _clipboard_get()
             js("var b=document.querySelector('#qq-close'); b&&b.click();")
@@ -1417,11 +1943,89 @@ def main(argv=None) -> int:
             R["browse"] = js(BROWSE_JS) or {}
             R["optlab"] = js(OPTLAB_JS) or {}
             R["leftw"] = js(LEFTW_JS) or {}
+            # CP-38: the single/merge switch (self-contained Mods root, no fixtures)
+            _mdir = _selftest_mods_dir()
+            R["modemerge"] = _probe_merge_mode(js, _mdir)
+            # CP-40: -ExportSrc is an ordinary option row whose switch really flips
+            exp = js(EXPORTSRC_JS) or {}
+            time.sleep(0.6)
+            exp.update(js(EXPORTSRC_READ_JS) or {})
+            R["exportsrc"] = exp
+            js("window.__cala.setParams({exportSrc:false})")
+            time.sleep(0.4)
+            # CP-40: the pre-flight card -- empty inputs, then a path that does not exist
+            R["notice_empty"] = _probe_notice_card(
+                js, {"mods": "", "paks": "", "out": ""}, "notice")
+            R["notice_bad"] = _probe_notice_card(
+                js, {"mods": os.path.join(tempfile.gettempdir(), "cala-no-such-mods"),
+                     "paks": a.paks,
+                     "out": os.path.join(tempfile.gettempdir(), "cala-selftest-out")},
+                "notice_bad")
+            # CP-41：单包模式用同一张卡片（漏填路径就弹，不启动任务）
+            R["notice_single"] = _probe_notice_card(
+                js, {"paks": "", "srcm": ""}, "notice_single", "single")
+            R["shot_notice"] = (R["notice_empty"] or {}).get("shot", "")
+            R["shot_notice_bad"] = (R["notice_bad"] or {}).get("shot", "")
+            R["shot_notice_single"] = (R["notice_single"] or {}).get("shot", "")
+            js("window.__cala.setMode('single')")
+            time.sleep(0.4)
+            js("window.__cala.setParams({paks:%s,srcm:%s})"
+               % (json.dumps(a.paks), json.dumps(a.srcm)))
+            time.sleep(0.3)
+            # the pre-flight probes overwrite mods/out -> put the checklist back the way
+            # the merge probe left it (the minimum-window geometry below reads it)
+            js("window.__cala.setMode('merge')")
+            time.sleep(0.5)
+            _refill = js(_merge_fill_js(_mdir)) or {}
+            say("ui refill     : %s" % _refill)
+            time.sleep(0.6)
+            js("window.__cala.setMode('single')")
+            time.sleep(0.5)
+
+            # CP-41：真的走一遍「合并 → 自动安装 → 成功弹窗」。
+            # Mods 夹具来自 tests/regression.py（T30）。**不能**用 `_ROOT` 推：冻结成
+            # exe 之后 `_ROOT` 是解包临时目录，所以路径由 `--merge-fixture` 显式传进来，
+            # 没传就按 `--paks` 反推仓库根（真机上是 `tests\fakegame` 那种布局）。
+            _paks = _paks_dir(a.paks)
+            _fx = a.merge_fixture
+            if _fx and not os.path.isdir(_fx):
+                _cand = os.path.join(
+                    os.path.dirname(os.path.dirname(os.path.dirname(_paks))),
+                    "mat", "merge", "ok")
+                _fx = _cand if os.path.isdir(_cand) else ""
+            if _fx:
+                R["mergedeploy"] = _probe_merge_deploy(
+                    js, port, _fx, _paks,
+                    os.path.join(tempfile.gettempdir(), "cala-selftest-merge"))
+            else:
+                say("ui merge deploy: SKIP (找不到 tests/mat/merge/ok —— 先跑一次 tests\\regression.py，"
+                    "或用 --merge-fixture 指定)")
+            js("window.__cala.setMode('single')")
+            time.sleep(0.5)
+            if a.selftest_shell:
+                try:
+                    window.resize(960, 620)
+                    time.sleep(1.3)
+                    js("window.__cala.setMode('merge')")
+                    time.sleep(0.7)
+                    R["modemerge_min"] = js(MERGE_MIN_JS) or {}
+                    R["runbar_min"] = js(RUNBAR_JS) or {}
+                    R["shot_merge_min"] = _grab("merge_min")
+                    js("window.__cala.setMode('single')")
+                    time.sleep(0.5)
+                    # CP-41：引导高亮会滚左栏，退出必须回到原位（最小窗口里左栏一定可滚）
+                    R["guide_scroll"] = _probe_guide_scroll(js)
+                    time.sleep(0.4)
+                    window.resize(1240, 820)
+                    time.sleep(1.2)
+                except Exception as e:  # noqa: BLE001
+                    R["error"] = "merge-mode resize failed: %s" % e
 
         # 3) optionally drive a real build from the page
         if a.selftest_ui:
             params = {"paks": a.paks, "srcm": a.srcm, "dryRun": True}
-            js("window.__cala.setParams(%s); window.__cala.run();" % json.dumps(params))
+            js("window.__cala.reset(); window.__cala.setParams(%s); window.__cala.run();"
+               % json.dumps(params))
             t0 = time.time()
             st = {}
             pseen = []
@@ -1475,6 +2079,17 @@ def main(argv=None) -> int:
             R["nowin"] = no_window.probe()
             time.sleep(0.4)
 
+            # 3a2) CP-41b：单包模式右下角的「回滚」按钮。
+            #      刚跑完的那次是 DryRun ⇒ 按钮**必须在、但置灰**（曾经被 v-if 藏掉，
+            #      单包默认就是 DryRun，于是回滚入口整个消失 —— 用户报的回归）；
+            #      然后真打包一次（关 DryRun）⇒ 按钮可点，点下去沙箱要回到打包前。
+            R["rollback_dry"] = js(ROLLBACK_BTN_JS) or {}
+            R["rollback_single"] = _probe_single_rollback(
+                js, port, a.paks, _paks_dir(a.paks), a.srcm, R["rollback_dry"])
+            # 这一步会真往沙箱里装一次、再回滚 ⇒ 页面/沙箱都要回到干净状态
+            js("window.__cala.reset()")
+            time.sleep(0.3)
+
             # 3b) a deliberately failing run: empty material folder -> the run
             #     fails early, which is exactly when the failure modal + the
             #     "导出错误日志" button matter.
@@ -1485,7 +2100,11 @@ def main(argv=None) -> int:
                     os.remove(os.path.join(bad, f))
             except OSError:
                 pass
-            js("window.__cala.setParams(%s); window.__cala.run();"
+            # CP-41：这个失败用例必须走**构建**失败（不是被错误卡片拦下），
+            # 所以先把页面明确切回单包模式，再让空素材目录跑一次 L0
+            js("window.__cala.setMode('single')")
+            time.sleep(0.4)
+            js("window.__cala.reset(); window.__cala.setParams(%s); window.__cala.run();"
                % json.dumps({"paks": a.paks, "srcm": bad, "dryRun": True}))
             t0 = time.time()
             st2 = {}
@@ -1531,6 +2150,38 @@ def main(argv=None) -> int:
                     % (st2.get("origin"), st2.get("guide"),
                        R["ob_second"].get("auto"), R["ob_second"].get("stored"),
                        R["reload_shot"]))
+                # CP-41：语言"自动嗅探 + 手动选择要记住"。
+                # 把 cala-lang 清掉再重载 ⇒ 页面应当按**系统语言**来（不是写死中文）；
+                # 手动切到 en ⇒ 写进 prefs.json；再重载 ⇒ 沿用英文。
+                prefs.clear(["cala-lang"])
+                jsq("location.reload()")
+                for _ in range(40):
+                    time.sleep(0.25)
+                    got = jsq("(function(){try{return JSON.stringify({has:!!window.__cala});}"
+                              "catch(e){return JSON.stringify({has:false});}})()")
+                    if got and got.get("has"):
+                        break
+                time.sleep(1.4)
+                R["lang_sniff"] = js(LANG_STATE_JS) or {}
+                R["shot_lang_sniff"] = _grab("lang_sniff")
+                jsq("window.__cala.setLang('en')")
+                time.sleep(1.0)
+                R["lang_persist"] = _prefs_http(port)
+                jsq("location.reload()")
+                for _ in range(40):
+                    time.sleep(0.25)
+                    got = jsq("(function(){try{return JSON.stringify({has:!!window.__cala});}"
+                              "catch(e){return JSON.stringify({has:false});}})()")
+                    if got and got.get("has"):
+                        break
+                time.sleep(1.2)
+                R["lang_after_reload"] = js(LANG_STATE_JS) or {}
+                say("ui language   : sniff=%s nav=%s stored=%s persist=%s after_reload=%s shot=%s"
+                    % (R["lang_sniff"].get("lang"), R["lang_sniff"].get("nav"),
+                       R["lang_sniff"].get("storedLang"),
+                       (R["lang_persist"].get("prefs") or {}).get("cala-lang"),
+                       (R["lang_after_reload"] or {}).get("lang"),
+                       R["shot_lang_sniff"]))
             time.sleep(0.3)
             try:
                 window.destroy()
@@ -1669,10 +2320,10 @@ def main(argv=None) -> int:
                  lg.get("scrollTop"), lg.get("atBottom"), lg.get("lines")))
         seen = [p for p in R["prog_seen"] if p is not None]
         say("ui progress   : track=%spx(rail %spx) fill=%spx pct=%s running=%s done=%s "
-            "head=%spx@%s railCY=%s headCY=%s barCY=%s src=%s moved=%s"
+            "head=%spx@%s railCY=%s headCY=%s barCY=%s barH=%spx src=%s moved=%s"
               % (pr.get("track"), pr.get("trackH"), pr.get("fill"), pr.get("pct"),
                  pr.get("running"), pr.get("done"), pr.get("headW"), pr.get("head"),
-                 pr.get("trackCY"), pr.get("headCY"), pr.get("barCY"),
+                 pr.get("trackCY"), pr.get("headCY"), pr.get("barCY"), pr.get("barH"),
                  (pr.get("headSrc") or "").rsplit("/", 1)[-1],
                  ("%s→%s" % (min(seen), max(seen))) if seen else "-"))
         say("ui progress@t0: pct=%s fill=%s (during the width transition)"
@@ -1698,8 +2349,10 @@ def main(argv=None) -> int:
               % (mfail.get("open"), mfail.get("kind"), mfail.get("text"),
                  (mfail.get("src") or "").rsplit("/", 1)[-1], mfail.get("imgOk"),
                  mfail.get("hasExport"), mfail.get("anim")))
-        say("ui fail run   : ok=%s error=%s" % (R["ui_fail"].get("ok"),
-                                                 (R["ui_fail"].get("error") or "")[:90]))
+        say("ui fail run   : ok=%s mode=%s notice=%s error=%s" % (R["ui_fail"].get("ok"),
+                                                                 R["ui_fail"].get("mode"),
+                                                                 R["ui_fail"].get("notice"),
+                                                                 (R["ui_fail"].get("error") or "")[:90]))
         ex = R["export"]
         say("ui export log : ok=%s bytes=%s lines=%s empty_case=%s %s"
               % (ex.get("ok"), ex.get("bytes"), ex.get("lines"),
@@ -1714,6 +2367,14 @@ def main(argv=None) -> int:
         say("              : fail=%s" % R["shot_fail"])
         say("              : layout=%s" % R["shot_layout"])
         say("              : layout_min=%s" % R.get("shot_layout_min"))
+        say("              : notice=%s notice_bad=%s merge_min=%s"
+            % (R.get("shot_notice"), R.get("shot_notice_bad"), R.get("shot_merge_min")))
+        say("              : notice_single=%s" % R.get("shot_notice_single"))
+        say("              : merge_progress=%s merge_ok=%s"
+            % ((R.get("mergedeploy") or {}).get("shot_progress"),
+               (R.get("mergedeploy") or {}).get("shot_ok")))
+        say("              : guide_scroll=%s lang_sniff=%s"
+            % ((R.get("guide_scroll") or {}).get("shot"), R.get("shot_lang_sniff")))
     if a.selftest_shell:
         for label, key in (("wide", "lay_wide"), ("min ", "lay_min"),
                            ("big ", "lay_big"), ("back", "lay_back")):
@@ -1757,9 +2418,10 @@ def main(argv=None) -> int:
         _hs = R.get("join_scroll") or {}
         say("hub icon      : d=%r fill=%s box=%spx" % (hb.get("iconD"), hb.get("iconFill"),
                                                         hb.get("iconBox")))
-        say("hub grid      : display=%s cols=%s rows=%s w=%s ids=%s"
+        say("hub grid      : display=%s cols=%s rows=%s buckets=%s tops=%s w=%s ids=%s"
               % (hb.get("actsDisplay"), hb.get("actCols"), hb.get("btnRows"),
-                 hb.get("btnW"), hb.get("btnIds")))
+                 hb.get("btnTopBuckets"), hb.get("btnTops"), hb.get("btnW"),
+                 hb.get("btnIds")))
         say("hub scroll    : idle=%s hovered=%s (scrollWidth vs clientWidth)"
               % (hb.get("scroll"), _hs.get("scroll")))
         say("star popup    : open=%s art=%s imgOk=%s %sx%s imgTop=%s textTop=%s anim=%s"
@@ -1774,8 +2436,10 @@ def main(argv=None) -> int:
                  qq.get("imgW"), qq.get("no"), qq.get("hasCopy")))
         say("qq copy       : title=%r (%s chars) %r note=%r"
               % (qq.get("title"), qq.get("bodyLen"), qq.get("bodyHead"), qq.get("note")))
-        say("clipboard     : after=%r before=%r dry=%s empty=%s"
-              % (R["clip_after"], R["clip_before"], R["clip_dry"], R["clip_dry_bad"]))
+        say("clipboard     : after=%r before=%r dry=%s empty=%s back=%s"
+              % (R["clip_after"], R["clip_before"], R["clip_dry"], R["clip_dry_bad"],
+                 {k: v for k, v in (R.get("clip_back") or {}).items()
+                  if k in ("ok", "reason")}))
         say("open_url gh   : %s" % R["url_gh"])
         say("open_url api  : good=%s bad=%s" % (R["url_ok"], R["url_bad"]))
         say("shots extra   : en=%s ls=%s join=%s"
@@ -1904,7 +2568,7 @@ def main(argv=None) -> int:
                       and min(a.get("btnH") or [0]) >= 24
                       for a in _acts),
         "the guide's button row wraps/squeezes/overflows: %s" % _acts[:3])
-    # the browse button keeps a readable label next to a long path
+    # ---- the browse button keeps a readable label next to a long path
     _bw = R.get("browse") or {}
     bad((_bw.get("w") or 0) >= 64 and _bw.get("hasIcon") is True
         and (_bw.get("labelH") or 99) <= 22 and _bw.get("clipped") is False
@@ -1941,6 +2605,264 @@ def main(argv=None) -> int:
                 for v in _olmin["rows"].values()),
             "an option row label wrapped or was truncated at the minimum window "
             "size: %s" % _olmin)
+    # ---- CP-38: the local single/merge switch --------------------------------
+    _mm = R.get("modemerge") or {}
+    _mr = _mm.get("merge") or {}
+    bad(not _mm.get("err") and _mr.get("mode") == "merge",
+        "switching to merge mode did not take: %s" % _mm)
+    bad(_mr.get("hasSrcm") is False and _mr.get("hasPaks") is False
+        and _mr.get("hasMods") is True and _mr.get("hasList") is True
+        and _mr.get("hasPick") is True and _mr.get("hasBase") is True
+        and _mr.get("hasOut") is True,
+        "the merge variant of the inputs card is wrong: %s" % _mr)
+    bad(_mr.get("optRows") == ["opt-strict", "opt-mergedry"],
+        "merge mode must show the strict-conflict rule + 仅产出不安装 only, got %s"
+        % _mr.get("optRows"))
+    bad(_mm.get("listRows") == 2 and _mm.get("checked") == 2
+        and (_mm.get("api") or {}).get("names") == ["ModA", "ModB"]
+        and (_mm.get("api") or {}).get("kinds") == ["da_edit", "ui_text"],
+        "the mod checklist did not come from the index manifest: %s" % _mm)
+    bad(_mm.get("clipped") == 0 and (_mm.get("widths") or {}).get("overflow") == 0,
+        "the merge card overflows its column: %s" % _mm)
+    bad(_mm.get("afterUncheck") == ["ModA:off", "ModB:on"],
+        "unticking a mod did not drop it from the selection: %s"
+        % _mm.get("afterUncheck"))
+    bad(_mm.get("afterRemove") == ["ModB:on"],
+        "removing a mod from the list did not work: %s" % _mm.get("afterRemove"))
+    _bk = _mm.get("back") or {}
+    bad(_bk.get("mode") == "single" and _bk.get("hasSrcm") is True
+        and _bk.get("hasMods") is False
+        and _bk.get("optRows") == ["opt-fit", "opt-dryrun", "opt-combined",
+                                   "opt-force", "opt-noatlas", "opt-exportsrc", "opt-adv"],
+        "switching back to single mode did not restore the original card: %s" % _bk)
+    # ---- CP-40: the protocol's hard rule reads as a rule, not as a switch -----
+    _st = _mm.get("strict") or {}
+    say("ui strict     : text=%r color=%s weight=%s mark=%s(%r) ruleSwitches=%s switches=%s"
+        % (_st.get("hint"), _st.get("color"), _st.get("weight"), _st.get("hasMark"),
+           _st.get("markText"), _st.get("ruleSwitches"), _st.get("switches")))
+    bad(_st.get("hint") and _st.get("hasMark") is True and _st.get("markText") == "!"
+        and (_st.get("weight") or "0") >= "700"
+        and _st.get("ruleSwitches") == 0,
+        "the strict-conflict rule is not styled as a hard rule (gold/bold/! badge, no "
+        "switch): %s" % _st)
+    bad(_st.get("color") in ("rgb(247, 231, 141)", "rgb(165, 129, 28)"),
+        "the strict rule is not the gold the user asked for (#F7E78D in dark, the "
+        "readable #a5811c in light): %s" % _st.get("color"))
+    _mmi = R.get("modemerge_min") or {}
+    if _mmi.get("rows") is not None:
+        say("ui merge min  : card=%spx col=%spx clip=%s/%s cardOver=%s tabs_clip=%s/%s"
+            % (_mmi.get("card"), _mmi.get("col"), _mmi.get("clipped"), _mmi.get("rows"),
+               _mmi.get("cardOverflow"), _mmi.get("tabClipped"), _mmi.get("tabs")))
+        bad(_mmi.get("tabs") == 2 and _mmi.get("tabClipped") == 0
+            and abs((_mmi.get("card") or 0) - (_mmi.get("col") or 0)) <= 3
+            and _mmi.get("cardOverflow") == 0 and _mmi.get("clipped") == 0
+            and _mmi.get("rows") == 2 and _mmi.get("mode") == "merge",
+            "the merge card does not fit the minimum window: %s" % _mmi)
+    # ---- CP-40: -ExportSrc is an ordinary option row, and its switch flips -----
+    _xs = R.get("exportsrc") or {}
+    say("ui exportsrc  : label=%r h=%s trunc=%s on %s->%s form %s->%s"
+        % (_xs.get("label"), _xs.get("h"), _xs.get("trunc"), _xs.get("onBefore"),
+           _xs.get("onAfter"), _xs.get("before"), _xs.get("after")))
+    bad(not _xs.get("err") and _xs.get("label") == "-ExportSrc"
+        and (_xs.get("h") or 99) <= 22 and _xs.get("trunc") is False,
+        "the -ExportSrc option row is missing or its label wraps/truncates: %s" % _xs)
+    bad(_xs.get("onBefore") is False and _xs.get("before") is False
+        and _xs.get("onAfter") is True and _xs.get("after") is True,
+        "ticking -ExportSrc did not flip the switch (and the form value): %s" % _xs)
+    # ---- CP-40: the run/cancel row must fit the form column at every size ------
+    # (with the pre-CP-40 28 px padding the row needed 16 px more across its two
+    # buttons -- `oldPad` prints that counterfactual spill, which is exactly the
+    # overflow the user reported at 960x620)
+    for _tg, _rb in (("wide", _mm.get("runbar")), ("min ", R.get("runbar_min"))):
+        _rb = _rb or {}
+        say("ui runbar %s : col=%s..%s run=%s..%s cancelRight=%s rows=%s spill=%s "
+            "oldPad(spill16)=%s colOverflow=%s label=%r"
+            % (_tg, _rb.get("colL"), _rb.get("colR"), _rb.get("runL"), _rb.get("runR"),
+               _rb.get("canR"), _rb.get("barRows"), _rb.get("spill"),
+               (_rb.get("spill") or 0) + 16, _rb.get("colOverflow"), _rb.get("label")))
+        if _rb.get("runR") is None:
+            continue
+        bad((_rb.get("spill") or 0) <= 1 and (_rb.get("colOverflow") or 0) <= 0,
+            "the run/cancel row spills out of the form column (%s): %s" % (_tg, _rb))
+        bad((_rb.get("runR") or 0) <= (_rb.get("colR") or 0) + 1
+            and (_rb.get("canR") or 0) <= (_rb.get("colR") or 0) + 1,
+            "a run-bar button crosses the column's right edge (%s): %s" % (_tg, _rb))
+    # ---- CP-40: the merge pre-flight card lists the problems BEFORE it starts ---
+    for _tg, _nt in (("empty", R.get("notice_empty")), ("bad path", R.get("notice_bad"))):
+        _rd = (_nt or {}).get("read") or {}
+        _cl = (_nt or {}).get("closed") or {}
+        say("ui notice %-8s: visible=%s lines=%s modal=%r running=%s meow=%r"
+            % (_tg, _rd.get("visible"), _rd.get("lines"), _rd.get("modal"),
+               _rd.get("running"), (_rd.get("meow") or "").strip()[:28]))
+        say("               errors=%s" % (_rd.get("texts") or []))
+        bad(not _rd.get("err") and _rd.get("visible") is True
+            and _rd.get("apiVisible") is True and (_rd.get("lines") or 0) >= 1,
+            "the pre-flight card did not appear for the %s case: %s" % (_tg, _rd))
+        bad(_rd.get("modal") in ("", None) and _rd.get("running") is False,
+            "a bad merge input must not start a task or raise the outcome modal "
+            "(%s): %s" % (_tg, _rd))
+        bad(_rd.get("artSrc") == "wrong.png" and _rd.get("artOk") is True
+            and bool((_rd.get("okBtn") or "").strip()),
+            "the pre-flight card is missing wrong.png / its 知道了 button (%s): %s"
+            % (_tg, _rd))
+        bad(_cl.get("visible") is False and _cl.get("open") is False,
+            "知道了 did not dismiss the pre-flight card (%s): %s" % (_tg, _cl))
+    _ne = ((R.get("notice_empty") or {}).get("read") or {})
+    bad(len(_ne.get("texts") or []) >= 3
+        and any("Mod 根目录" in t for t in (_ne.get("texts") or []))
+        and any("Paks" in t for t in (_ne.get("texts") or []))
+        and any("输出目录" in t for t in (_ne.get("texts") or [])),
+        "the empty-input case does not list all three missing fields: %s"
+        % (_ne.get("texts") or []))
+    _nb = ((R.get("notice_bad") or {}).get("read") or {})
+    bad(any("不存在" in t for t in (_nb.get("texts") or [])),
+        "a Mods folder that does not exist is not reported as such: %s"
+        % (_nb.get("texts") or []))
+    # ---- CP-40: the progress frame got shorter, its contents did not ----------
+    _pr40 = R.get("prog") or {}
+    if _pr40.get("barH"):
+        say("ui prog frame : barH=%spx headH=%spx trackH=%spx (content unchanged)"
+            % (_pr40.get("barH"), _pr40.get("headH"), _pr40.get("trackH")))
+        bad(56 <= (_pr40.get("barH") or 0) <= 66,
+            "the progress frame was not narrowed by ~20-30%% (80 -> ~62 px): %s"
+            % _pr40.get("barH"))
+        bad((_pr40.get("headH") or 0) >= 66 and (_pr40.get("trackH") or 0) == 12,
+            "the chongci.gif head or the rail changed size with the frame: %s" % _pr40)
+    # ---- CP-41：合并模式的「仅产出不安装」（默认关闭 ⇒ 自动安装）----------------
+    _md = _mm.get("mergedry") or {}
+    say("ui mergedry   : rows=%s label=%r off=%s form %s->%s"
+        % (_md.get("rows"), _md.get("label"), _md.get("offByDefault"),
+           _md.get("formBefore"), _md.get("formAfter")))
+    bad(not _md.get("err") and _md.get("rows") == ["opt-strict", "opt-mergedry"]
+        and _md.get("label") == "仅产出不安装" and (_md.get("hint") or "").strip(),
+        "合并模式缺少「仅产出不安装」这一行（或顺序不对）: %s" % _md)
+    bad(_md.get("offByDefault") is True and _md.get("formBefore") is False
+        and _md.get("onAfter") is True and _md.get("formAfter") is True,
+        "「仅产出不安装」默认必须是关的（合并后自动装进游戏），勾选要能翻过来: %s" % _md)
+    # ---- CP-41：单包模式也用同一张错误卡片 ------------------------------------
+    _ns = (R.get("notice_single") or {}).get("read") or {}
+    say("ui notice single: visible=%s lines=%s modal=%r running=%s errors=%s"
+        % (_ns.get("visible"), _ns.get("lines"), _ns.get("modal"), _ns.get("running"),
+           _ns.get("texts")))
+    bad(not _ns.get("err") and _ns.get("visible") is True
+        and (_ns.get("lines") or 0) == 2 and (_ns.get("mode") == "single")
+        and _ns.get("modal") in ("", None) and _ns.get("running") is False,
+        "单包模式漏填路径时没有弹错误卡片（或启动了任务）: %s" % _ns)
+    bad(any("Paks" in t for t in (_ns.get("texts") or []))
+        and any("素材" in t for t in (_ns.get("texts") or [])),
+        "单包错误卡片没有逐条列出缺的路径: %s" % _ns.get("texts"))
+    bad(((R.get("notice_single") or {}).get("closed") or {}).get("visible") is False,
+        "单包错误卡片的「知道了」关不掉: %s" % (R.get("notice_single") or {}).get("closed"))
+    # ---- CP-41：合并 → 自动安装 → 成功弹窗（端到端）---------------------------
+    _dp = R.get("mergedeploy") or {}
+    if _dp.get("state") is not None:
+        say("ui merge deploy: ok=%s deployed=%s seconds=%s M7=%s"
+            % ((_dp.get("state") or {}).get("ok"), (_dp.get("state") or {}).get("deployed"),
+               _dp.get("seconds"), "M7" in ((_dp.get("state") or {}).get("seen") or {})))
+        say("               : target=%s" % (_dp.get("deploy") or {}).get("target"))
+        say("               : backup=%s txt=%s hasOld=%s"
+            % (_dp.get("backup_dir"), _dp.get("backup_txt_exists"),
+               _dp.get("backup_txt_has_old")))
+        _stt = _dp.get("state") or {}
+        _dep = _dp.get("deploy") or {}
+        bad(_stt.get("ok") is True and _stt.get("deployed") is True,
+            "合并+自动安装没有成功: ok=%s deployed=%s error=%s"
+            % (_stt.get("ok"), _stt.get("deployed"), _stt.get("error")))
+        bad("M7" in (_stt.get("seen") or {}),
+            "进度阶段里没有 M7（安装阶段）: %s" % (_stt.get("seen") or {}))
+        bad(_dep.get("ok") is not False and bool(_dep.get("target")),
+            "报告里没有安装信息: %s" % _dep)
+        _want = _dp.get("container_ucas")
+        _got = (_dp.get("after") or {}).get(PKG_BASE + ".ucas")
+        bad(bool(_want) and bool(_got) and _want[:16] == _got,
+            "游戏目录里的 .ucas 不是刚构建的那份: want=%s got=%s" % ((_want or "")[:16], _got))
+        bad(_dp.get("backup_txt_exists") is True,
+            "没有写备份账本 BACKUP.txt: %s" % _dp.get("backup_dir"))
+        bad(_dp.get("before") == (_dp.get("after_rollback") or _dp.get("before")),
+            "回滚之后游戏目录没有回到安装前的状态: %s -> %s"
+            % (_dp.get("before"), _dp.get("after_rollback")))
+        _mds = _dp.get("modal") or {}
+        bad(_mds.get("open") is True and _mds.get("kind") == "ok"
+            and "已安装" in (_mds.get("sub") or ""),
+            "合并成功弹窗没说「已安装到游戏」: %s" % _mds)
+        bad("已安装" in (_mds.get("deployBox") or ""),
+            "判据面板没有显示「装到哪、备份在哪」: %s" % _mds.get("deployBox"))
+        bad(bool(_dp.get("shot_progress")) and bool(_dp.get("shot_ok")),
+            "合并过程/成功弹窗的截图没抓到: %s" % (_dp.get("shot_progress"),))
+        # CP-41b：合并模式的「回滚」按钮必须可点，并且真的把旧容器放回去
+        _mb = _dp.get("btn") or {}
+        say("ui merge rollback: btn=%s disabled=%s click=%s text=%r after=%s"
+            % (_mb.get("exists"), _mb.get("disabled"), _dp.get("click"),
+               (_dp.get("rollback_text") or "")[:60], _dp.get("after_rollback")))
+        bad(_mb.get("exists") is True and _mb.get("disabled") is False
+            and (_dp.get("click") or {}).get("clicked") is True,
+            "合并模式装完后「回滚」按钮不在/不可点: btn=%s click=%s"
+            % (_mb, _dp.get("click")))
+        bad("已回滚" in (_dp.get("rollback_text") or "")
+            or "rc=0" in (_dp.get("rollback_text") or ""),
+            "点了「回滚」之后界面没有报成功: %r" % (_dp.get("rollback_text") or "")[:120])
+    # ---- CP-41b：单包模式的「回滚」按钮（DryRun 置灰 / 真装可点 / 点了真回滚）----
+    _rd, _rs = R.get("rollback_dry") or {}, R.get("rollback_single") or {}
+    say("ui rollback dry: exists=%s disabled=%s label=%r openOut=%r buttons=%s"
+        % (_rd.get("exists"), _rd.get("disabled"), _rd.get("label"),
+           _rd.get("openOut"), _rd.get("buttons")))
+    bad(_rd.get("exists") is True and _rd.get("disabled") is True,
+        "DryRun 之后单包模式的「回滚」按钮不在（回归！）或没有置灰: %s" % _rd)
+    bad(_rd.get("openOut") and "打开输出目录" in (_rd.get("openOut") or ""),
+        "右下角那颗「打开输出目录」也不见了: %s" % _rd)
+    if _rs.get("state") is not None:
+        _rb, _rsb = _rs.get("btn") or {}, _rs.get("btn_after") or {}
+        say("ui rollback run: deployed=%s btn=%s disabled=%s click=%s text=%r"
+            % ((_rs.get("state") or {}).get("deployed"), _rb.get("exists"),
+               _rb.get("disabled"), _rs.get("click"), (_rs.get("text") or "")[:70]))
+        say("               : sandbox %s -> %s -> %s"
+            % (_rs.get("before"), _rs.get("deployed_snapshot"), _rs.get("after")))
+        bad((_rs.get("state") or {}).get("ok") is True
+            and (_rs.get("state") or {}).get("deployed") is True,
+            "单包真打包（关 DryRun）没有成功部署: %s" % (_rs.get("state")))
+        bad(_rb.get("exists") is True and _rb.get("disabled") is False,
+            "真装之后单包「回滚」按钮不可点: %s" % _rb)
+        bad(_rs.get("before") != _rs.get("deployed_snapshot"),
+            "真打包没有真的把容器装进沙箱: %s" % _rs.get("deployed_snapshot"))
+        bad((_rs.get("click") or {}).get("clicked") is True,
+            "单包「回滚」按钮点不动: %s" % _rs.get("click"))
+        bad("rc=0" in (_rs.get("text") or "") or "uninstall.ps1" in (_rs.get("text") or ""),
+            "点了「回滚」之后没有跑到 uninstall.ps1: %r" % (_rs.get("text") or "")[:120])
+        bad(_rs.get("after") == _rs.get("before"),
+            "单包「回滚」之后沙箱没有回到打包前的状态: %s -> %s"
+            % (_rs.get("before"), _rs.get("after")))
+        bad(_rsb.get("exists") is True and _rsb.get("disabled") is True,
+            "回滚完成之后按钮没有置灰（已经没有可回滚的东西了）: %s" % _rsb)
+    # ---- CP-41：引导高亮会滚，退出要回原位 ------------------------------------
+    _gs = R.get("guide_scroll") or {}
+    if _gs.get("before"):
+        _b, _d, _a = _gs.get("before") or {}, _gs.get("during") or {}, _gs.get("after") or {}
+        say("ui guide scroll: before=%s during=%s(%s) after=%s step=%s hole=%s inView=%s shot=%s"
+            % (_b.get("leftTop"), _d.get("leftTop"), _d.get("saved"), _a.get("leftTop"),
+               _d.get("step"), (_d.get("holeTop"), _d.get("holeBottom")), _d.get("inView"),
+               _gs.get("shot")))
+        bad(_d.get("open") is True and _d.get("step") == 1,
+            "引导没有跳到要测的那一步: %s" % _d)
+        bad((_b.get("leftTop") or 0) > 0 and (_d.get("leftTop") or 0) < (_b.get("leftTop") or 0),
+            "引导没有为了高亮把元素滚进视口（滚动值没变）: %s -> %s"
+            % (_b.get("leftTop"), _d.get("leftTop")))
+        bad(_d.get("inView") is True,
+            "高亮框没有落在视口内: %s" % _d)
+        bad(_a.get("open") is False and (_a.get("leftTop") == _b.get("leftTop")),
+            "引导结束后没有把滚动位置还原: %s -> %s" % (_b.get("leftTop"), _a.get("leftTop")))
+    # ---- CP-41：语言自动嗅探 + 手动选择要记住 ---------------------------------
+    _ls, _lp, _lr = R.get("lang_sniff") or {}, R.get("lang_persist") or {}, \
+        R.get("lang_after_reload") or {}
+    if _ls:
+        say("ui lang sniff : lang=%s expect=%s nav=%s stored=%s persisted=%s after_reload=%s"
+            % (_ls.get("lang"), _ls.get("expect"), _ls.get("nav"), _ls.get("storedLang"),
+               (_lp.get("prefs") or {}).get("cala-lang"), _lr.get("lang")))
+        bad(_ls.get("storedLang") is None and _ls.get("lang") == _ls.get("expect"),
+            "清掉 cala-lang 之后语言没有按系统语言嗅探: %s" % _ls)
+        bad((_lp.get("prefs") or {}).get("cala-lang") == "en",
+            "手动切到英文没有写进 prefs.json: %s" % (_lp.get("prefs") or {}))
+        bad(_lr.get("lang") == "en" and _lr.get("storedLang") == "en",
+            "重载之后没有沿用上次手动选的语言: %s" % _lr)
     # ---- i18n: the switch has to rewrite the page, not just flip a variable ----
     def _cjk(s):
         return any("\u4e00" <= c <= "\u9fff" for c in (s or ""))
@@ -2159,7 +3081,8 @@ def main(argv=None) -> int:
         bad(abs((sa.get("paneA") or 0) - (sa.get("paneB") or 0)) <= 40,
             "after the reset the two panes are not 50/50: %s" % sa)
         # ---- the ReactBits Line Sidebar ---------------------------------------
-        want = ["opt-fit", "opt-dryrun", "opt-combined", "opt-force", "opt-noatlas", "opt-adv"]
+        want = ["opt-fit", "opt-dryrun", "opt-combined", "opt-force", "opt-noatlas",
+                "opt-exportsrc", "opt-adv"]
         bad(lm.get("ids") == want,
             "the options are not a Line Sidebar list: %s" % lm.get("ids"))
         near = lr.get("opt-force") or {}
@@ -2218,7 +3141,7 @@ def main(argv=None) -> int:
             "the GitHub entry does not use the Octicon mark-github path: %r"
             % hb.get("iconD"))
         # four entries, one 2x2 grid, all the same width
-        bad(hb.get("actsDisplay") == "grid" and hb.get("btnRows") == 2
+        bad(hb.get("actsDisplay") == "grid" and hb.get("btnTopBuckets") == 2
             and len(hb.get("actCols", "").split()) == 2,
             "the four community buttons are not a 2x2 grid: %s" % hb)
         bad(len(set(hb.get("btnW") or [])) == 1 and (hb.get("btnW") or [0])[0] > 100,
@@ -2276,9 +3199,17 @@ def main(argv=None) -> int:
             "the copy endpoint refused a dry run: %s" % R["clip_dry"])
         bad((R["clip_dry_bad"] or {}).get("ok") is False,
             "the copy endpoint accepted empty text: %s" % R["clip_dry_bad"])
-        bad(R["clip_restored"] is None or R["clip_restored"] == R["clip_before"],
-            "the self-test did not put the user's clipboard back: %r vs %r"
-            % (R["clip_restored"], R["clip_before"]))
+        # 自检不许把用户的剪贴板弄丢：还原成功才算过。万一他原本复制的是一大段
+        # 文本（`/api/copy` 有长度上限），这里要**明说还原不了**，而不是静默留一份
+        # 群号在他剪贴板里（CP-41b：他正是复制着一整条消息来报 bug 的）。
+        _cb = R.get("clip_back") or {}
+        if _cb.get("ok") is False:
+            say("clipboard     : 还原被拒绝（%s）—— 用户原本的剪贴板内容太长，跳过严格比对"
+                % _cb.get("reason"))
+        else:
+            bad(R["clip_restored"] is None or R["clip_restored"] == R["clip_before"],
+                "the self-test did not put the user's clipboard back: %r vs %r"
+                % (R["clip_restored"], R["clip_before"]))
         # the window really is adaptive: a taller window must give a taller log
         wide, big = R["lay_wide"], R["lay_big"]
         bad((big.get("log") or 0) > (wide.get("log") or 0),

@@ -144,6 +144,73 @@
 .uv-scope .uv-modal-note.bad { color: var(--bad); }
 .uv-scope .uv-modal-note.ok  { color: var(--ok); }
 
+/* ---- CP-40: the pre-flight "fix these first" card ------------------------
+   Same machinery as the outcome dialog, but the halo is the chongci gold and the
+   body is a list: one line per problem the backend found before merging. */
+.uv-scope .uv-modal-backdrop[data-kind='notice'] {
+  background: color-mix(in srgb, #05070c 64%, transparent);
+  z-index: 44;                       /* above the outcome modal (40) */
+}
+.uv-scope .uv-modal.notice {
+  width: min(560px, 93vw);
+  gap: 12px;
+  padding: 22px 24px 18px;
+}
+.uv-scope .uv-modal-backdrop[data-kind='notice'] .uv-modal::before {
+  background: radial-gradient(closest-side,
+              color-mix(in srgb, var(--c1) 52%, transparent), transparent 72%);
+}
+.uv-scope .uv-modal-backdrop[data-kind='notice'] .uv-modal-text {
+  background: linear-gradient(100deg, var(--c1), var(--c2) 60%, var(--c1));
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+html[data-theme='light'] .uv-scope .uv-modal-backdrop[data-kind='notice'] .uv-modal-text {
+  background: linear-gradient(100deg, #a5811c, #1c8fa4 60%, #a5811c);
+  -webkit-background-clip: text;
+  background-clip: text;
+}
+.uv-scope .notice-art {
+  width: min(300px, 56vw);
+  height: auto;
+  max-height: 34vh;
+  object-fit: contain;
+  animation-duration: 4.2s;
+}
+.uv-scope .notice-list {
+  position: relative;
+  width: 100%;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  max-height: 34vh;
+  overflow: auto;
+}
+.uv-scope .notice-list li {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 8px 11px;
+  border-radius: 10px;
+  font-size: 12.8px;
+  line-height: 1.5;
+  word-break: break-word;
+  background: color-mix(in srgb, var(--c1) 10%, transparent);
+  color: var(--ink);
+  animation: uv-notice-line .34s var(--ease) both;
+}
+.uv-scope .notice-list li::before { content: '❌'; flex: none; font-size: 12px; }
+html[data-theme='light'] .uv-scope .notice-list li { background: rgba(165, 129, 28, .12); }
+.uv-scope .notice-warns { width: 100%; text-align: left; max-height: 18vh; overflow: auto; }
+@keyframes uv-notice-line {
+  from { opacity: 0; transform: translateX(-8px); }
+  to   { opacity: 1; transform: translateX(0); }
+}
+
 /* ==========================================================================
    "Join us" variant of the same dialog: same backdrop/scale-in machinery, a
    bigger illustration, a gold->cyan halo and the two community buttons.

@@ -30,6 +30,8 @@ if _ROOT not in sys.path:
 
 from core.builder import Builder, Ctx  # noqa: E402
 from core.common import BuildError, Log  # noqa: E402
+from core.deploy import DEFAULT_BASE as DEPLOY_BASE, install as deploy_install  # noqa: E402
+from core.merger import merge_mods  # noqa: E402
 
 MAX_BUFFERED_LINES = 800          # kept for SSE reconnects
 DEFAULT_LOG_NAME = "build.log"
@@ -60,8 +62,8 @@ class CancelableLog(Log):
 
     def __call__(self, stage: str, msg: str = "") -> None:
         super().__call__(stage, msg)
-        if stage == "L5":
-            # the deploy step must be atomic: stop honouring Cancel here
+        if stage in ("L5", "M7"):
+            # 部署（单包 L5 / 合并 M7）必须是原子的：到这里就不再理会取消
             self._armed = False
         self._check()
 
@@ -91,12 +93,13 @@ class Task:
     def push(self, line: str) -> None:
         self.buffer.append(line)
         self.queue.put({"kind": "line", "line": line})
-        # stage tracking for the progress bar: "[ts] [L2] message"
+        # stage tracking for the progress bar: "[ts] [L2] message" for a single
+        # build, "[ts] [M3] message" for a mod merge (CP-38)
         try:
             parts = line.split("] [")
             if len(parts) >= 2:
                 st = parts[1].split("]")[0].strip()
-                if st and st[0] == "L" and st != self.stage:
+                if len(st) >= 2 and st[0] in "LM" and st[1:].isdigit() and st != self.stage:
                     self.stage = st
                     self.queue.put({"kind": "stage", "stage": st, "line": line})
         except Exception:  # noqa: BLE001
@@ -149,6 +152,94 @@ def start(params: Dict[str, Any]) -> Task:
     return task
 
 
+def start_merge(params: Dict[str, Any]) -> Task:
+    """Create a task and run a multi-mod merge in a worker thread.
+
+    The merge goes through `core.merger.merge_mods()` -- the SAME engine the CLI
+    uses -- so the GUI never re-implements the protocol (and `core/` stays the
+    single source of truth).  Merge-level failures come back as a report with
+    `ok=false`, not as an exception, so the page always gets a verdict.
+    """
+    tid = uuid.uuid4().hex[:12]
+    task = Task(id=tid, params=dict(params))
+    with _LOCK:
+        _TASKS[tid] = task
+    task.thread = threading.Thread(target=_run_merge, args=(task,),
+                                   name="cala-merge-%s" % tid, daemon=True)
+    task.thread.start()
+    return task
+
+
+# --------------------------------------------------------------------------
+def _run_merge(task: Task) -> None:
+    p = task.params
+    mods = os.path.abspath(p["mods"])
+    out = os.path.abspath(p["out"])
+    os.makedirs(out, exist_ok=True)
+    log = CancelableLog(path=os.path.join(out, "merge.log"), echo=False,
+                        cancel=task.cancel)
+    log.add_sink(task.push)
+    task.out_patch = out
+    try:
+        kit_obj = None
+        if p.get("kit"):
+            # same meaning as the CLI's -Kit: use that tool folder instead of the
+            # one next to the exe / in the project tree
+            from core.kit import load_kit
+            kit_obj = load_kit(p["kit"], None, log, "M0")
+        rep = merge_mods(mods, p.get("paks") or "", out, p.get("select") or None,
+                         log=log, kit=kit_obj, keep_work=bool(p.get("keep_work")))
+        d = rep.to_dict()
+        task.ok = bool(d.get("ok"))
+        task.report = d
+        task.error = None if task.ok else (d.get("error") or "合并失败")
+
+        # ---- CP-41：合并成功后**自动安装**（除非勾了「仅产出不安装」）----------
+        # 这一步与单包 L5 同一套约定：写前备份 → 写入 → 逐文件读回 sha256 →
+        # 任一步不符就自动还原；失败时任务判失败，但报告里保留合并结果。
+        if task.ok and not bool(p.get("dry_run")):
+            base = (d.get("container") or {}).get("base") or DEPLOY_BASE
+            # 安装目标 = 合并器**解析出来的**干净基底（用户填的可能是游戏根目录，
+            # 而安装必须落在真正的 Content\Paks 上）
+            target = (d.get("resolved") or {}).get("paks_dir") or p.get("paks") or ""
+            try:
+                info = deploy_install(out, target, base=base, log=log, stage="M7")
+                info["ok"] = True
+                d["deploy"] = info
+            except Exception as e:  # noqa: BLE001
+                task.ok = False
+                task.error = ("合并成功，但安装进游戏失败（游戏目录已自动还原）：%s"
+                              % (str(e) or type(e).__name__))
+                d["deploy"] = {"ok": False, "error": str(e) or type(e).__name__}
+                log("M7", task.error)
+        elif task.ok:
+            d["deploy"] = None
+            # 用 M6 这个标签（而不是 M7）：勾了「仅产出不安装」时不该出现部署阶段，
+            # 否则进度条会显示一个根本没做的步骤
+            log("M6", "仅产出不安装（DryRun）：容器留在 %s，游戏目录未被改动" % out)
+
+    except BuildCanceled as e:
+        task.ok = False
+        task.error = "已取消（取消发生在打包之前，输出目录未被写入）/ canceled: %s" % e
+        task.report = {"ok": False, "error": task.error}
+    except Exception as e:  # noqa: BLE001
+        import traceback
+        task.ok = False
+        task.error = "%s: %s" % (type(e).__name__, e)
+        try:
+            log.raw(traceback.format_exc())
+        except Exception:  # noqa: BLE001
+            pass
+        task.report = {"ok": False, "error": task.error}
+    finally:
+        task.finished = time.time()
+        log.close()
+        task.push_event("done", {"ok": bool(task.ok), "error": task.error,
+                                 "out_patch": task.out_patch,
+                                 "seconds": round(task.finished - task.started, 2)})
+        task.done.set()
+
+
 # --------------------------------------------------------------------------
 def _run(task: Task) -> None:
     p = task.params
@@ -158,7 +249,9 @@ def _run(task: Task) -> None:
               fit=p.get("fit", "cover"), force=bool(p.get("force")),
               dry_run=bool(p.get("dry_run")), combined=bool(p.get("combined")),
               ffmpeg=p.get("ffmpeg") or None, kit_dir=p.get("kit") or None,
-              no_thumb=bool(p.get("no_thumb")), no_atlas=bool(p.get("no_atlas")))
+              no_thumb=bool(p.get("no_thumb")), no_atlas=bool(p.get("no_atlas")),
+              # CP-40: -ExportSrc (also write this build as a mergeable Mod)
+              export_src=bool(p.get("export_src")), src_name=p.get("src_name") or "")
     log = CancelableLog(path=log_path, echo=False, cancel=task.cancel)
     log.add_sink(task.push)
     b = Builder(ctx, log)

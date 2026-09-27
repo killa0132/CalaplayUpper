@@ -58,11 +58,15 @@ const art = computed(() => (props.kind === 'ok' ? 'success.png' : 'cry.png'))
 const title = computed(() => (props.kind === 'ok' ? t('modal.okTitle') : t('modal.failTitle')))
 const errorText = computed(() => (props.report && props.report.error) || '')
 const sub = computed(() => {
+  const r = props.report || {}
   if (props.kind === 'ok') {
-    const r = props.report || {}
+    // CP-41：合并现在会自动装进游戏，文案要跟着结果走
+    if (r.merge) return r.deployed ? t('modal.okMergedDeployed') : t('modal.okMerged')
     if (r.deployed === false) return t('modal.okDry')
     return t('modal.okDeployed')
   }
+  // 合并成功但安装失败时，先把"是什么失败"说清楚
+  if (r.merge && r.deploy) return t('modal.failDeploy')
   return t('modal.failSub')
 })
 

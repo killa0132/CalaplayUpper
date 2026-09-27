@@ -22,6 +22,13 @@ personal study and entertainment only.
   per background, so it shows *your* picture instead of the game's original tile
 * **No more stretching** (new in v1.1.0): portrait / square pictures are refused with a clear message,
   every landscape picture is accepted
+* **Several mods can coexist** (new in v1.2.0): someone else's mod and yours can both be active instead of
+  overwriting each other. Switch the left card to *Multi-mod merge*, pick a folder, let the tool **sniff**
+  the mods inside (tick the ones you want) and press *Start merging* — you get **one** patch container
+  that contains all of them
+* **A build is a mod** (new in v1.2.0): with `-ExportSrc` a single-package build also writes
+  `mod_src/<name>_src/` (a `manifest.json` plus every asset), which can be fed straight into
+  *Multi-mod merge* to combine it with other mods
 * **Bilingual UI**: switch between 中文 and English on the fly
 * **First-run guide**: nine guided steps the first time you open it
 * **Desktop GUI**: no command line — just double-click the exe
@@ -115,8 +122,32 @@ The UI has a few options; beginners can ignore them.
 | DryRun | Dry run only — builds and checks everything without installing |
 | Combined | Append to the previous build instead of starting over |
 | Force | Force the build when the material exceeds the default limits |
+| ExportSrc | Also write a **mergeable Mod source** (`mod_src/<name>_src/`) that can be fed straight into *Multi-mod merge* |
 
 Default limits: ≤ 59 backgrounds, ≤ 10 minutes of audio, image quality ≥ 25 dB.
+
+## 🤝 Several mods at once (v1.2.0)
+
+Only **one** `_P` patch container can live in the game folder at a time (same-named containers are
+mutually exclusive), so installing two mods side by side is impossible — the tool merges them into
+**one** container instead:
+
+1. Switch the left card to **Multi-mod merge**.
+2. *Game Paks folder (the clean base)* = the game's `Content\Paks` (read-only; the merger never writes there).
+3. *Mods root*: pick a folder — the tool **recursively finds every Mod with a `manifest.json`** and lists
+   them (tick/remove as you like). An existing index is used if present, otherwise one is generated.
+   Several folders work too (`;` in the field, or multi-select in the dialog).
+   * Your own builds become Mods this way: tick **ExportSrc** while packing.
+4. Press **Start merging** → the output folder gets `CalaPlayer-Windows_P.{pak,ucas,utoc}` **and it is installed into
+   the game for you** (the previous container is backed up into `<output>\install_backup_<timestamp>\` first, every
+   written file is read back, and any mismatch restores automatically). Restart the game to see it; press the
+   **Roll back** button in the gates panel to undo this install (it is greyed out when nothing was installed).
+   For debugging, tick *Produce only (no install)* and the game folder is left alone.
+5. Conflicts (two mods editing the same table row, or providing the same file) fail loudly and produce
+   **no** container, naming both sides — that rule comes from the protocol and cannot be switched off.
+
+The field-level protocol (for mod authors) is in
+[`docs/MOD_MERGE_PROTOCOL.md`](docs/MOD_MERGE_PROTOCOL.md).
 
 ## 🧭 Known limitations
 
@@ -152,6 +183,25 @@ Default limits: ≤ 59 backgrounds, ≤ 10 minutes of audio, image quality ≥ 2
 * You need to own **CalaPlayer itself**. This tool only packs your material; it does not include the game.
 
 ## 🆕 Changelog
+
+**v1.2.0 (2026-09-27)** — backward-compatible feature additions: single-package packing and
+multi-mod merging are now one pipeline:
+
+* **Several mods can coexist**: a new *Multi-mod merge* mode sniffs the mods inside a folder
+  (generating the index for you) and merges them into one `_P` container; the protocol refuses
+  conflicts loudly and produces nothing (see “Several mods at once” above).
+* **Merging installs itself**: pressing the button also installs the container into the game
+  (backup → write → read back → auto-restore on any mismatch) and the dialog says “installed,
+  restart to see it”. *Produce only (no install)* in the options turns that off for debugging.
+* **A build is a mod**: `-ExportSrc` also writes a mergeable Mod source (`mod_src/<name>_src/`).
+* **Pre-flight card**: missing inputs or non-existent paths are listed in one big card instead of a
+  mysterious failure three seconds later (the single-package mode uses the same card).
+* **The Roll back button exists in both modes**: greyed out when nothing is installed, live once it
+  is, and one click puts the previous container back.
+* UI polish: the protocol's "cannot be switched off" rule is now gold + bold with an exclamation
+  badge; the start button can no longer overflow the form column in a small window; the progress
+  bar's dark frame got 22.5 % shorter (its contents keep their size); the first-run guide restores
+  your scroll position when it closes.
 
 **v1.1.0 (2026-09-25)** — backward-compatible feature additions:
 

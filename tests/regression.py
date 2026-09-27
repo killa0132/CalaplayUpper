@@ -442,6 +442,95 @@ def _do_merge_scenario(sc, tag: str) -> str:
                              rep["container"]["content_sha256"][:16]))
 
 
+def _do_deploy_scenario(sc, tag: str) -> str:
+    """CP-41：把合并产物**装进一份沙箱副本**，逐文件读回，再回滚到字节一致。
+
+    为什么用副本而不是 `tests/fakegame` 本体：本套件的开头/结尾都在核对"沙箱必须与真机
+    逐字节一致"，让测试往沙箱里装东西会把这个不变式弄脏。副本 = 5 个原生容器**硬链接**
+    （只读，不可能被写坏）+ 沙箱里那份 `_P` 三件套**复制**一份，所以 install/rollback 的
+    每一步都作用在真实文件上，而沙箱本体一个字节都不动（最后也会断言这点）。
+    """
+    import os as _os
+    sys.path.insert(0, ROOT)
+    from core.common import Log as _Log
+    from core import deploy as DEP
+
+    fx = build_merge_fixtures()
+    out = os.path.join(MERGE, "out_%s" % sc["id"])
+    shutil.rmtree(out, ignore_errors=True)
+    rc, rep, proc = run_merge(fx[sc["srcm"]], out)
+    check(rep is not None and rep.get("ok"),
+          "%s the merge that feeds the deploy failed (rc=%d)\n%s"
+          % (tag, rc, (proc.stderr or b"").decode("utf-8", "replace")[-400:]))
+
+    sandbox_before = patch_snapshot(PAKS)
+    paks = os.path.join(MERGE, "deploy_paks")
+    shutil.rmtree(paks, ignore_errors=True)
+    _os.makedirs(paks, exist_ok=True)
+    natives = [f for f in sorted(_os.listdir(PAKS))
+               if f.startswith("CalaPlayer-Windows.") and f.endswith((".pak", ".ucas", ".utoc"))]
+    check(len(natives) >= 3, "%s the sandbox has no native containers to copy: %s" % (tag, natives))
+    for f in _os.listdir(PAKS):
+        src = _os.path.join(PAKS, f)
+        if not _os.path.isfile(src):
+            continue
+        dst = _os.path.join(paks, f)
+        if f.startswith("CalaPlayer-Windows_P."):
+            shutil.copy2(src, dst)                       # 已装的补丁：复制（会被移走/还原）
+        else:
+            try:
+                _os.link(src, dst)                       # 原生容器：硬链接，只读
+            except OSError:
+                shutil.copy2(src, dst)
+
+    before = patch_snapshot(paks)
+    native_before = {f: sha256(_os.path.join(paks, f)) for f in natives}
+    log = _Log(echo=False)
+    try:
+        info = DEP.install(out, paks, log=log)
+    except Exception as e:  # noqa: BLE001
+        check(False, "%s install() raised %s: %s" % (tag, type(e).__name__, e))
+        return ""
+
+    # 装进去的必须正好是刚构建的那三个文件
+    for ext in ("pak", "ucas", "utoc"):
+        live = _os.path.join(paks, "CalaPlayer-Windows_P.%s" % ext)
+        check(_os.path.isfile(live), "%s .%s was not installed" % (tag, ext))
+        check(sha256(live) == rep["container"]["files"][ext]["sha256"],
+              "%s the installed .%s is not the merged container" % (tag, ext))
+        check(info["installed"][ext]["sha256"] == rep["container"]["files"][ext]["sha256"],
+              "%s the report's .%s hash does not match the container" % (tag, ext))
+        check(_os.path.getsize(live) == rep["container"]["files"][ext]["bytes"],
+              "%s the installed .%s has the wrong size" % (tag, ext))
+    check(_os.path.isdir(info["backup"]) and _os.path.isfile(info["backup_txt"]),
+          "%s no backup folder / BACKUP.txt was written: %s" % (tag, info.get("backup")))
+    check(_os.path.basename(info["backup"]).startswith("install_backup_"),
+          "%s the backup folder is not named install_backup_*: %s" % (tag, info["backup"]))
+    check(_os.path.dirname(_os.path.abspath(info["backup"])) == _os.path.abspath(out),
+          "%s the backup did not land inside the output folder: %s" % (tag, info["backup"]))
+    txt = open(info["backup_txt"], encoding="utf-8").read()
+    if before:
+        check(info.get("replaced"), "%s the previous container was not recorded" % tag)
+        for ext in ("pak", "ucas", "utoc"):
+            if ("CalaPlayer-Windows_P.%s" % ext) in before:
+                check(before["CalaPlayer-Windows_P.%s" % ext][:16] in txt,
+                      "%s BACKUP.txt does not mention the replaced .%s hash" % (tag, ext))
+    check(info.get("natives_unchanged") is True,
+          "%s the native containers changed during the install" % tag)
+    after_native = {f: sha256(_os.path.join(paks, f)) for f in natives}
+    check(after_native == native_before, "%s a native container was rewritten" % tag)
+
+    rb = DEP.rollback(info["backup"], paks, log=log)
+    check(rb.get("ok") is True, "%s rollback() did not report ok" % tag)
+    check(patch_snapshot(paks) == before,
+          "%s the rollback did not restore the sandbox copy byte-for-byte" % tag)
+    check(patch_snapshot(PAKS) == sandbox_before,
+          "%s the REAL sandbox was touched by the deploy test" % tag)
+    return ("%s OK (ucas %s -> %s, backup %s, natives untouched, rollback byte-exact)"
+            % (tag, (before.get("CalaPlayer-Windows_P.ucas") or "-")[:16],
+               rep["container"]["files"]["ucas"]["sha16"], _os.path.basename(info["backup"])))
+
+
 # --------------------------------------------------------------------------
 # scenario runner
 # --------------------------------------------------------------------------
@@ -581,6 +670,9 @@ SCENARIOS = [
          kind="merge", srcm="conflict_file", ok=False, err_has="WBP_MainMenu", conflicts=True),
     dict(id="T33", name="merge: a mod without the mandatory 'files' list is rejected",
          kind="merge", srcm="no_files", ok=False, err_has="'files'"),
+    # ---- CP-41: 合并产物自动安装（core/deploy.py = install_merged.ps1 的 Python 孪生）------
+    dict(id="T34", name="deploy: merged container -> backup, read back, byte-exact rollback",
+         kind="deploy", srcm="ok"),
 ]
 
 
@@ -792,6 +884,8 @@ def do_scenario(sc, cmd_prefix, state):
 def _do_scenario(sc, cmd_prefix, state):
     if sc.get("kind") == "merge":
         return _do_merge_scenario(sc, "[%s] %-46s" % (sc["id"], sc["name"]))
+    if sc.get("kind") == "deploy":
+        return _do_deploy_scenario(sc, "[%s] %-46s" % (sc["id"], sc["name"]))
     if sc.get("needs_bundled"):
         bundled = os.path.join(os.path.dirname(cmd_prefix[0]), "kit", "ffmpeg", "ffmpeg.exe")
         if not os.path.isfile(bundled):

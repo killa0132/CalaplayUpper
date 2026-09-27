@@ -11,6 +11,10 @@ Endpoints (see docs/2026-09-23_gui_design.md):
     GET  /api/select_folder        native folder dialog (needs the window)
     GET  /api/open_folder          reveal out_patch in Explorer
     POST /api/uninstall            run the generated uninstall.ps1 (rollback)
+    GET  /api/mods                 discover the Mods under a folder (merge input)
+    POST /api/validate             pre-flight for a merge/single build -> the specific errors
+    POST /api/merge                {mods, paks, out, select[]} -> one merged _P (CP-38)
+                                   + 自动安装进游戏（CP-41，`dry_run` 可关）
 
 Security: bound to 127.0.0.1 only AND every /api call must carry the per-run
 token (`?t=` or the `X-Cala-Token` header), so another local program cannot
@@ -27,7 +31,7 @@ import secrets
 import socket
 import subprocess
 import sys
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from fastapi import Body, FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
@@ -39,6 +43,8 @@ if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
 from core.builder import TOOL_VERSION  # noqa: E402
+from core import deploy as deploy_mod  # noqa: E402
+from gui import mods as mods_mod  # noqa: E402
 from gui import prefs  # noqa: E402
 from gui import tasks  # noqa: E402
 
@@ -79,6 +85,24 @@ def _folder_dialog_kind(webview):
         except Exception:  # noqa: BLE001
             pass
     return 20          # the historical numeric value of FolderDialog
+
+
+def _validate_single(paks: str, srcm: str) -> Dict[str, Any]:
+    """单包打包的合并前检查（CP-41）：只查两个路径填了没有、在不在。
+
+    输出目录由素材目录派生（`<素材上级>\\out_patch`），所以这里没有第三个输入框；
+    真正的"素材里有没有 bg/BGM/Sound/Ambient"仍由 L0 报（它有别名表和中文提示）。
+    """
+    errors: List[str] = []
+    if not paks.strip():
+        errors.append("游戏 Paks 目录未填写")
+    elif not os.path.isdir(paks):
+        errors.append("游戏 Paks 目录不存在：%s" % paks)
+    if not srcm.strip():
+        errors.append("素材根目录未填写")
+    elif not os.path.isdir(srcm):
+        errors.append("素材根目录不存在：%s" % srcm)
+    return {"ok": not errors, "errors": errors, "warnings": [], "mode": "single"}
 
 
 def create_app() -> FastAPI:
@@ -133,11 +157,82 @@ def create_app() -> FastAPI:
             "combined": bool(body.get("combined")),
             "force": bool(body.get("force")),
             "no_atlas": bool(body.get("no_atlas")),
+            # CP-40: also write this build as a mergeable Mod (<out_patch>/mod_src/)
+            "export_src": bool(body.get("export_src")),
+            "src_name": (body.get("src_name") or "").strip() or None,
             "ffmpeg": body.get("ffmpeg") or None,
             "kit": body.get("kit") or None,
         }
         t = tasks.start(params)
         return {"task_id": t.id, "params": params}
+
+    # ------------------------------------------------------------------ merge
+    # CP-38: the multi-mod merge reuses `core/merger.py` -- the page only picks a
+    # Mods folder and which mods are enabled.  A merge task behaves exactly like a
+    # build task (same SSE stream, same /api/report), so the log + verdict panes
+    # need no new plumbing.
+    # CP-40: `dir` may name several folders (`;` separated) or a parent of the
+    # `-ExportSrc` output; `gui/mods.py` turns it into one Mods root the merger
+    # accepts (existing index -> used as-is, else a generated one / a staged root).
+    @app.get("/api/mods")
+    def list_mods(dir: str = Query("")) -> Dict[str, Any]:
+        return mods_mod.discover(dir)
+
+    @app.post("/api/validate")
+    def validate(body: Dict[str, Any] = Body(default={})) -> Dict[str, Any]:
+        """合并/打包**开始之前**必须成立的条件（驱动错误卡片）。
+
+        与真实任务分开，是为了让页面能一次列出全部问题，而不是启动任务后几秒才失败。
+        `mode="merge"`（默认）走 Mod 目录发现 + 基底检查；`mode="single"` 只查单包的两个路径。
+        """
+        select = body.get("select")
+        if select is not None and not isinstance(select, list):
+            raise HTTPException(400, "select must be a list of mod names")
+        mode = str(body.get("mode") or "merge")
+        if mode == "single":
+            return _validate_single(str(body.get("paks") or ""), str(body.get("srcm") or ""))
+        spec = str(body.get("mods") or "")
+        if body.get("mod_dirs"):
+            spec = ";".join(str(x) for x in (body["mod_dirs"] or []))
+        return mods_mod.validate(spec, str(body.get("paks") or ""), str(body.get("out") or ""),
+                                 [str(s) for s in select] if select is not None else None)
+
+    @app.post("/api/merge")
+    def merge(body: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
+        spec = str(body.get("mods") or "").strip()
+        if body.get("mod_dirs"):
+            spec = ";".join(str(x) for x in (body["mod_dirs"] or []))
+        out = (body.get("out") or "").strip()
+        paks = (body.get("paks") or "").strip()
+        if not spec or not out:
+            raise HTTPException(400, "mods and out are required")
+        if not paks:
+            raise HTTPException(400, "the clean base (game Paks folder) is required")
+        if not os.path.isdir(paks):
+            raise HTTPException(400, "the game Paks folder does not exist: %s" % paks)
+        select = body.get("select")
+        if select is not None and not isinstance(select, list):
+            raise HTTPException(400, "select must be a list of mod names")
+        # the SAME discovery the page used, so `mods` in the task is the real root
+        got = mods_mod.discover(spec)
+        if not got.get("ok"):
+            raise HTTPException(400, got.get("message")
+                                or "no usable Mods folder: %s" % spec)
+        if not os.path.isfile(os.path.join(got["root"], "manifest.json")):
+            raise HTTPException(400, "no manifest.json (the index) in %s" % got["root"])
+        running = [t for t in tasks.all_tasks() if t["finished"] is None]
+        if running:
+            raise HTTPException(409, "a task is already running (%s); wait for it or cancel it"
+                                % running[0]["id"])
+        params = {"mods": got["root"], "roots": got.get("roots") or [got["root"]],
+                  "source": got.get("source"), "paks": paks, "out": out,
+                  "select": [str(s) for s in (select or [])],
+                  "kit": body.get("kit") or None,
+                  "keep_work": bool(body.get("keep_work")),
+                  # CP-41：默认**装进游戏**；勾「仅产出不安装」时 dry_run=True
+                  "dry_run": bool(body.get("dry_run"))}
+        t = tasks.start_merge(params)
+        return {"task_id": t.id, "params": params, "mods": got.get("mods") or []}
 
     # ------------------------------------------------------------------ logs
     @app.get("/api/logs/{task_id}")
@@ -266,7 +361,10 @@ def create_app() -> FastAPI:
         t = text or ""
         if not t.strip():
             return {"ok": False, "reason": "empty", "message": "nothing to copy"}
-        if len(t) > 256:
+        if len(t) > 2048:
+            # CP-41b：上限从 256 提到 2048 —— 自检要用它把用户**原本**的剪贴板内容
+            # 放回去（他可能复制着一整条消息），256 会让"还原"永远失败并留下群号。
+            # 仍然是个上限：页面写进来的东西不该是任意大的一块。
             return {"ok": False, "reason": "too_long", "message": "refusing to copy that much"}
         if dry:
             return {"ok": True, "would_copy": t, "dry": True}
@@ -342,8 +440,18 @@ def create_app() -> FastAPI:
         cap = _Cap()
         for lg in logs:
             lg.addHandler(cap)
+        # "多次选择" for the Mods root (CP-40): pywebview takes allow_multiple for every
+        # dialog kind, but be explicit about falling back when the signature lacks it.
+        args = {}
+        if kind == "mods":
+            try:
+                import inspect
+                if "allow_multiple" in inspect.signature(WINDOW.create_file_dialog).parameters:
+                    args["allow_multiple"] = True
+            except Exception:  # noqa: BLE001
+                args = {}
         try:
-            res = WINDOW.create_file_dialog(kind_value, directory=start_dir)
+            res = WINDOW.create_file_dialog(kind_value, directory=start_dir, **args)
         except Exception as e:  # noqa: BLE001
             raise HTTPException(500, "the native dialog failed: %s: %s" % (type(e).__name__, e))
         finally:
@@ -368,7 +476,11 @@ def create_app() -> FastAPI:
             except Exception as e:  # noqa: BLE001
                 dbg = {"introspect_failed": str(e)}
             return {"path": None, "debug": dbg}
-        return {"path": res[0] if isinstance(res, (list, tuple)) else res}
+        paths = [p for p in (list(res) if isinstance(res, (list, tuple)) else [res]) if p]
+        if not paths:
+            return {"path": None, "debug": {"empty_selection": True}}
+        # several folders -> `;` separated; gui/mods.py splits that back apart
+        return {"path": ";".join(str(p) for p in paths), "paths": paths}
 
     # --------------------------------------------------------- open in explorer
     @app.get("/api/open_folder")
@@ -390,16 +502,37 @@ def create_app() -> FastAPI:
     # ------------------------------------------------------------- rollback
     @app.post("/api/uninstall")
     def uninstall(body: Dict[str, Any] = Body(default={})) -> Dict[str, Any]:
-        """Rollback = run the uninstall.ps1 that the build already produced.
-        No new rollback logic lives in the GUI (that is the whole point)."""
+        """回滚 = 跑构建/合并产物里已经准备好的回滚素材，GUI 里没有新的回滚逻辑。
+
+        * 单包：调 `out_patch\\uninstall.ps1`（构建时就生成好的）。
+        * 合并（CP-41）：安装时把旧容器移到了 `<输出目录>\\install_backup_*\\real_P\\`，
+          这里直接调 `core.deploy.rollback()` 把它们放回去。
+        """
         t = tasks.get(body.get("task_id") or "")
         out_patch = (body.get("out_patch") or (t.out_patch if t else "") or "")
+        paks = body.get("paks") or (t.params.get("paks") if t else "") or ""
+        dep = ((t.report if t else None) or {}).get("deploy") or {}
+        if dep.get("backup") and os.path.isdir(dep["backup"]):
+            # CP-41b：回滚目标用**报告里记下的安装目录**，不是用户在输入框里填的那个 ——
+            # 他可能填的是游戏根目录，那样会把旧容器复制到错的地方。
+            target = dep.get("target") or paks
+            try:
+                info = deploy_mod.rollback(dep["backup"], target,
+                                           base=dep.get("base") or deploy_mod.DEFAULT_BASE)
+                return {"rc": 0, "stdout": "已回滚到安装前：%s" % dep["backup"], "stderr": "",
+                        "rollback": info}
+            except Exception as e:  # noqa: BLE001
+                raise HTTPException(500, "回滚失败：%s" % (str(e) or type(e).__name__))
         if not out_patch or not os.path.isdir(out_patch):
             raise HTTPException(400, "out_patch not found")
         ps1 = os.path.join(out_patch, "uninstall.ps1")
         if not os.path.isfile(ps1):
             raise HTTPException(404, "uninstall.ps1 not found in %s" % out_patch)
-        paks = body.get("paks") or (t.params.get("paks") if t else "") or ""
+        # CP-41b：把**解析出来的** Paks 目录交给 uninstall.ps1 —— 用户在输入框里填的
+        # 可能是游戏根目录，直接透传会让脚本在那儿造出一堆同名容器、而真正的补丁
+        # 一个都没删（本轮 G4 抓到过：连 L0 的游戏发现都被那些垃圾文件带偏了）。
+        paks = ((t.report if t else None) or {}).get("resolved", {}).get("paks_dir") \
+            or body.get("paks") or (t.params.get("paks") if t else "") or ""
         argv = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", ps1]
         if paks:
             argv += ["-Paks", paks]

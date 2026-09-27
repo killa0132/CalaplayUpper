@@ -81,6 +81,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\build_srcm.ps1 `
 | `-DryRun` | 只跑 L0~L4（出容器 + 全判据），**绝不碰游戏目录** |
 | `-Combined` | 在上一次 `out_patch` 成果之上**累积**（不是每次从原生表重建）。累积状态就是 `out_patch\work\manifest.json` 加同目录的 legacy 树；**失败的运行不会把它吃掉**，且没有历史时会明确告诉你 `nothing to carry` |
 | `-Force` | 越过限额（bg ≤ 59 张、音频总时长 ≤ 10 min、PSNR ≥ 25 dB） |
+| `-ExportSrc` | 除容器外，再导出一份**可被合并的 Mod 源**：`<out_patch>\mod_src\<名字>_src\`（`manifest.json` + 全部资产，遵循 `docs/MOD_MERGE_PROTOCOL.md`；目标 DA 表作为行源随包但不进 `files`）。DryRun 也会导出 |
+| `-SrcName <名字>` | `-ExportSrc` 的 Mod 名（默认 `CalaplayUpper`，文件夹 = `<名字>_src`）。要合并两份自产 Mod 时用它区分，否则会撞名/撞文件路径 |
 | `-Ffmpeg <exe>` | 手动指定 ffmpeg |
 | `-Kit <dir>` | 手动指定工具目录 |
 
@@ -515,12 +517,18 @@ python gui\desktop.py --selftest      # 自检：开窗 -> 页面加载 -> 页�
 `GET /api/report/{id}` · `POST /api/cancel/{id}` · `GET /api/select_folder` ·
 `GET /api/open_folder` · `POST /api/uninstall`。同一时刻只允许一个构建在跑（否则 409）。
 
+CP-38/CP-40 追加的合并接口：`GET /api/mods?dir=`（**递归发现 Mod**：有合法索引就用、没有就地生成、
+选了父目录/多目录就把 Mod 汇集到 `%TEMP%\cala-mods-root` 再合并；实现见 `gui/mods.py`）·
+`POST /api/validate`（`{mods,paks,out,select[]}` → `{ok,errors[],warnings[]}`，合并前检查，喂给错误卡片）·
+`POST /api/merge`（`{mods|mod_dirs, paks, out, select[]}` → 合并任务，与构建任务共用 SSE/报告管线）。
+
 验证（G1，一条命令）：
 
 ```powershell
 python tests\gui_api_check.py
 #   令牌 403 / 走 HTTP 跑一次 dry-run 并看实时日志 / 与 CLI 的判据逐项一致 /
-#   真部署 + /api/uninstall 回滚到部署前 / 取消真的停得下来 / 真机目录不动
+#   -ExportSrc 导出的 Mod 源结构体检 / 那份 mod_src 直接喂回合并器 M0~M6 全 PASS /
+#   /api/validate 的四类报错 / 真部署 + /api/uninstall 回滚到部署前 / 取消真的停得下来 / 真机目录不动
 ```
 
 ### 10.1 主题与背景（两张图交叉淡入）

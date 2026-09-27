@@ -4,7 +4,7 @@
     build_srcm.ps1 -Paks <game Paks dir> -Srcm <material root>
                    [-Fit cover|contain] [-Force] [-DryRun] [-Combined]
                    [-Ffmpeg <ffmpeg.exe>] [-Kit <dir>] [-NoDeploy] [-KeepWork]
-                   [-NoThumb] [-NoAtlas]
+                   [-NoThumb] [-NoAtlas] [-ExportSrc] [-SrcName <Mod name>]
 
 Exit codes: 0 = ok, 2 = bad arguments, 3 = build failed (see build.log).
 """
@@ -71,6 +71,15 @@ def parse_args(argv=None):
                         "chip stays 2K, but the timeline cell and the side preview show native "
                         "atlas tile 0,0 again. Diagnostic switch: the default gives every "
                         "background its own cell on the game's own preview grid.")
+    p.add_argument("-ExportSrc", "--export-src", action="store_true",
+                   help="also write this build as a mergeable Mod: <out_patch>\\mod_src\\"
+                        "<name>_src\\ with a manifest.json (targets + files) and every asset "
+                        "it contributes, ready to feed to the multi-Mod merge "
+                        "(docs/MOD_MERGE_PROTOCOL.md)")
+    p.add_argument("-SrcName", "--src-name", default=None, metavar="NAME",
+                   help="Mod name for -ExportSrc (default: CalaplayUpper -> the folder is "
+                        "<NAME>_src). Give each export its own name when you plan to merge "
+                        "two builds of this tool: two Mods may not provide the same file path.")
     p.add_argument("-Log", "--log", default=None, metavar="FILE",
                    help="log file path (default: <srcm parent>\\build.log)")
     p.add_argument("-Quiet", "--quiet", action="store_true", help="do not echo the log")
@@ -90,7 +99,8 @@ def main(argv=None) -> int:
     ctx = Ctx(paks_arg=a.paks, srcm_arg=srcm, fit=a.fit, force=a.force,
               dry_run=bool(a.dry_run or a.no_deploy), combined=a.combined,
               ffmpeg=a.ffmpeg, kit_dir=a.kit, keep_work=a.keep_work,
-              no_thumb=bool(a.no_thumb), no_atlas=bool(a.no_atlas))
+              no_thumb=bool(a.no_thumb), no_atlas=bool(a.no_atlas),
+              export_src=bool(a.export_src), src_name=(a.src_name or ""))
     log = Log(path=log_path, echo=not a.quiet)
     b = Builder(ctx, log)
     ok = False

@@ -2,6 +2,7 @@
 #   powershell -NoProfile -ExecutionPolicy Bypass -File .\build_srcm.ps1 `
 #       -Paks "D:\Games\CalaPlayer\Content\Paks" -Srcm "D:\srcm"
 #       [-Fit cover|contain] [-Force] [-DryRun] [-Combined] [-Ffmpeg <exe>] [-Kit <dir>]
+#       [-NoThumb] [-NoAtlas] [-ExportSrc] [-SrcName <Mod name>]
 param(
     [Parameter(Mandatory=$true)][string]$Paks,
     [Parameter(Mandatory=$true)][string]$Srcm,
@@ -15,6 +16,8 @@ param(
     [switch]$KeepWork,
     [switch]$NoThumb,
     [switch]$NoAtlas,
+    [switch]$ExportSrc,
+    [string]$SrcName = "",
     [switch]$Quiet
 )
 
@@ -46,6 +49,8 @@ if ($Kit)      { $argv += @("-Kit", $Kit) }
 if ($KeepWork) { $argv += "-KeepWork" }
 if ($NoThumb)  { $argv += "-NoThumb" }
 if ($NoAtlas)  { $argv += "-NoAtlas" }
+if ($ExportSrc) { $argv += "-ExportSrc" }
+if ($SrcName)  { $argv += @("-SrcName", $SrcName) }
 if ($Quiet)    { $argv += "-Quiet" }
 
 & $cmd @argv

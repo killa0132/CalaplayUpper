@@ -101,7 +101,7 @@ def tool_version() -> str:
         from .builder import TOOL_VERSION
         return str(TOOL_VERSION)
     except Exception:
-        return "1.1.0"
+        return "1.2.0"
 
 
 # --------------------------------------------------------------------------
@@ -496,6 +496,7 @@ class MergeEngine:
 
     # ---------------- M1: conflicts ----------------
     def m1_conflicts(self) -> None:
+        self.log("M1", "conflict check over %d mod(s)" % len(self.mods))
         claims: Dict[Tuple[str, int], List[Tuple[str, str]]] = {}
         files: Dict[str, List[Tuple[str, str]]] = {}
         for m in self.mods:
@@ -802,6 +803,8 @@ class MergeEngine:
     # ---------------- M4: files ----------------
     def m4_files(self) -> None:
         log = self.log
+        log("M4", "merging the mods' asset files into one legacy tree (%d file(s))"
+            % sum(len(m.files) for m in self.mods))
         ensure_dir(self.legacy)
         staged = 0
         for m in self.mods:

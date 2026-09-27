@@ -42,7 +42,12 @@ from .da import (AudioRow, BgRow, append_audio_rows, append_bg_rows, append_mi_r
 from .kit import FFMPEG_HELP, Kit, load_kit
 from .wavutil import compliance, read_wav, verify_identity
 
-TOOL_VERSION = "1.1.0"
+TOOL_VERSION = "1.2.0"
+
+#: CP-40 `-ExportSrc`: the single-package pipeline also writes this build as a
+#: mergeable Mod (`<out_patch>/mod_src/<name>_src/`, see docs/MOD_MERGE_PROTOCOL.md)
+SRC_MOD_DIRNAME = "mod_src"
+SRC_MOD_NAME = "CalaplayUpper"
 
 
 # --------------------------------------------------------------------------
@@ -95,6 +100,9 @@ class Ctx:
     deploy: bool = True
     no_thumb: bool = False          # -NoThumb: do not author preview MIs (v1 behaviour)
     no_atlas: bool = False          # -NoAtlas: keep the CP-36 shape (whole-image MI, no atlas)
+    # CP-40: also export this build as a mergeable Mod (`<out_patch>/mod_src/<name>_src/`)
+    export_src: bool = False
+    src_name: str = ""              # Mod name for that export (default SRC_MOD_NAME)
 
     # discovered
     game: config.GamePaths = None
@@ -124,6 +132,8 @@ class Builder:
         self.rollback: Dict = {}
         self._t0 = time.time()
         self._prev_manifest: Dict = {}
+        #: CP-40: what `-ExportSrc` produced ({} when the switch is off)
+        self.src_export: Dict = {}
         # CP-35 route B: the BC1 mip table of the TARGET canvas (index, size, size_x, size_y).
         # L0 re-derives it and proves the uexp byte model on the shell before anything uses it.
         self.mip_want = texture.mip_table(config.TARGET_W, config.TARGET_H)
@@ -1314,6 +1324,8 @@ class Builder:
         self._stage_paks_for_gates()
         self._gates()
         self._write_manifest()
+        if c.export_src:
+            self._export_src()
 
     def _write_manifest(self) -> None:
         """Persist what this build produced so a later `-Combined` run can accumulate.
@@ -1332,10 +1344,86 @@ class Builder:
         self.log("L4", "manifest written: %d material(s) available for a later -Combined run"
                  % len(allm))
 
+    # ---- CP-40: -ExportSrc -------------------------------------------------
+    def _export_src(self) -> None:
+        """Write `<out_patch>\\mod_src\\<name>_src\\`: THIS build as a mergeable Mod.
+
+        The container and the merge protocol are two views of the same thing -- a mod is
+        `manifest.json` (`targets` + `files`) plus the assets it contributes.  The export is
+        taken from the **assembled legacy tree** (never from the individual work folders), so
+        whatever `-Combined` carried along is exported too and the declaration can never drift
+        from what the container really holds.
+
+        * `files`    = every file in the legacy tree EXCEPT the target DA tables (those are the
+                       row source: `targets`, per docs/MOD_MERGE_PROTOCOL.md §3.4)
+        * `targets`  = the rows this build appended on top of the native tables (append-only)
+        * paths      = the legacy relative paths, verbatim (never flattened)
+        """
+        c, log = self.c, self.log
+        name = (c.src_name or SRC_MOD_NAME).strip()
+        folder = "%s_src" % name
+        root = ensure_dir(os.path.join(c.out_patch, SRC_MOD_DIRNAME, folder))
+        legacy = os.path.join(c.work, "legacy")
+        if not os.path.isdir(legacy):
+            raise BuildError("L4", "-ExportSrc has no legacy tree to export", legacy)
+
+        da_stems = {"DA_Backgrounds", "DA_BGM", "DA_Ambient", "DA_Sounds"}
+        files: List[str] = []
+        tables: Dict[str, str] = {}
+        copied = 0
+        for dirpath, _dirs, fs in os.walk(legacy):
+            for f in sorted(fs):
+                src = os.path.join(dirpath, f)
+                rel = os.path.relpath(src, legacy).replace("\\", "/")
+                dst = os.path.join(root, *rel.split("/"))
+                ensure_dir(os.path.dirname(dst))
+                shutil.copy2(src, dst)
+                copied += 1
+                if os.path.splitext(f)[0] in da_stems:
+                    tables.setdefault(os.path.splitext(f)[0], rel)     # row source, not a file
+                else:
+                    files.append(rel)
+
+        targets: Dict[str, Dict[str, List[int]]] = {}
+        for tag, _ua in self.da_out.items():
+            base = self.da_base_counts.get(tag, 0)
+            final = self.da_counts.get(tag, base)
+            rows = list(range(base, final))               # append-only: rows base..final-1
+            if rows:
+                targets[tag] = {"appended_rows": rows}
+        for tag in targets:
+            if tag not in tables:
+                raise BuildError("L4", "-ExportSrc: %s was appended but is not in the "
+                                      "exported tree" % tag, root)
+
+        man = {
+            "name": name,
+            "folder": folder,
+            "version": TOOL_VERSION,
+            "author": "CalaPlayerSrcmBuilder",
+            "kind": "da_edit" if targets else "ui_text",
+            "targets": targets,
+            "files": sorted(files),
+            "note": "exported by CalaPlayerSrcmBuilder %s (-ExportSrc). The DA tables listed "
+                    "in 'targets' are the row source and are shipped next to this manifest; "
+                    "they are deliberately NOT part of 'files'." % TOOL_VERSION,
+        }
+        man_path = os.path.join(root, "manifest.json")
+        with open(man_path, "w", encoding="utf-8", newline="\n") as f:
+            json.dump(man, f, indent=2, ensure_ascii=False)
+        self.src_export = {"dir": os.path.dirname(root), "root": root, "manifest": man_path,
+                           "name": name, "folder": folder, "kind": man["kind"],
+                           "targets": targets, "files": man["files"], "copied": copied}
+        log("L4", "-ExportSrc: mod source written to %s" % root)
+        log("L4", "  mod_src manifest: name=%s folder=%s kind=%s targets=%s files=%d (files "
+                  "exclude the DA row source; paths kept legacy-relative)"
+            % (name, folder, man["kind"],
+               ", ".join("%s=%s" % (t, v["appended_rows"]) for t, v in sorted(targets.items()))
+               or "{}", len(files)))
+
     def _carried_names(self) -> set:
         return {str(m.get("name", "")).lower()
                 for m in self._prev_manifest.get("materials", []) if m.get("name")}
-
     def _prev_materials(self) -> List[Material]:
         """The previous build's materials (read back from its manifest) as `Material` objects.
 
@@ -2032,6 +2120,7 @@ class Builder:
             "params": {"paks": c.paks_arg, "srcm": c.srcm_arg, "fit": c.fit, "force": c.force,
                        "dry_run": c.dry_run, "combined": c.combined,
                        "no_thumb": c.no_thumb, "no_atlas": c.no_atlas,
+                       "export_src": c.export_src, "src_name": c.src_name or SRC_MOD_NAME,
                        "max_bg": config.limit_max_bg(),
                        "ffmpeg": c.ffmpeg, "kit": (self.kit.root if self.kit else None)},
             "resolved": {"paks_dir": (c.game.paks_dir if c.game else None),
@@ -2052,6 +2141,10 @@ class Builder:
             "stages": self.stages,
             "materials": [asdict(m) for m in self.materials],
             "carried_materials": [asdict(m) for m in self.carried_materials],
+            # CP-40: the mergeable Mod source this run exported (-ExportSrc), if any
+            "mod_src": (dict(self.src_export,
+                             files=len(self.src_export.get("files", []))) if self.src_export
+                        else None),
             "da_counts": getattr(self, "da_counts", {}),
             "gates": self.gates,
             "ledger": getattr(self, "ledger", {}),

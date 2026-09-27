@@ -10,20 +10,25 @@
    riding it.  The sprite is centred on the rail (top:50% + translateY(-50%))
    and the rail is centred in the bar (align-items:center), which is what keeps
    the head exactly on the bar's vertical centre line rather than hanging off
-   it.  The self-test asserts that centring numerically. */
+   it.  The self-test asserts that centring numerically.
+   CP-40: the dark frame was 80 px tall (68 px sprite + 12) with 6 px of padding
+   top and bottom -- much more black than the content needed, so the frame is now
+   62 px (-22.5%) with 2 px of padding.  Nothing inside changed size: the caption,
+   the rail and the GIF head keep their own dimensions (the sprite is absolutely
+   positioned, so it simply rides the slimmer pill). */
 .uv-scope .uv-prog {
   --p: 0;                       /* 0..100, set from the page */
   --c1: #f7e78d;                /* gold  (chongci.gif frames 0/3) */
   --c2: #7dd7e4;                /* cyan  (chongci.gif frames 1/2) */
-  --head: 68px;                 /* the chongci.gif sprite */
+  --head: 68px;                 /* the chongci.gif sprite (UNCHANGED) */
   --rail: 12px;                 /* the track thickness (unchanged from v1) */
   position: relative;
   flex: none;
   display: flex;
   align-items: center;
   gap: 16px;
-  min-height: calc(var(--head) + 12px);
-  padding: 6px 22px;
+  min-height: calc(var(--head) - 6px);   /* 62 px, was 80 px */
+  padding: 2px 22px;                     /* was 6 px 22px */
   border: 1px solid var(--panel-line);
   border-radius: 999px;
   background: var(--panel);

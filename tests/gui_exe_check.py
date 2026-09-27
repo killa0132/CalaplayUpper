@@ -280,6 +280,18 @@ def no_console_headless(exe: str) -> int:
 
 def selftest(exe: str, keep_log: bool = False) -> int:
     print("[2] self-test through the frozen exe (windowed -> logs to a file)")
+    # CP-41：自检里那一下"合并 → 自动安装"用的是 tests/regression.py 造的 Mod 夹具
+    # （T30）。夹具不在就先把它造出来，否则这一步会静默 SKIP（判据就变弱了）。
+    fixture = os.path.join(HERE, "mat", "merge", "ok")
+    if not os.path.isdir(fixture):
+        print("      building the merge fixture first (tests/regression.py --only T30)")
+        try:
+            subprocess.run([sys.executable, os.path.join(HERE, "regression.py"),
+                            "--only", "T30"], cwd=ROOT, timeout=900,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception as e:  # noqa: BLE001
+            print("      fixture build failed: %s: %s" % (type(e).__name__, e))
+        print("      fixture present: %s" % os.path.isdir(fixture))
     # the deliverable must not gain files just because the self-test ran a build
     # that gets rejected (a bad srcm folder used to leave a build.log next to the exe)
     kit = os.path.dirname(exe)
@@ -287,6 +299,8 @@ def selftest(exe: str, keep_log: bool = False) -> int:
     logf = os.path.join(tempfile.gettempdir(), "cala_gui_selftest_%d.txt" % os.getpid())
     argv = [exe, "--selftest", "--selftest-ui", "--selftest-shell",
             "--paks", FAKEGAME, "--srcm", SRCM, "--log-file", logf,
+            # CP-41：冻结 exe 的 _ROOT 是自己的解包目录，夹具路径必须显式传
+            "--merge-fixture", os.path.join(HERE, "mat", "merge", "ok"),
             "--selftest-seconds", "60"]
     t0 = time.time()
     out_f = os.path.join(tempfile.gettempdir(), "cala_gui_out_%d.txt" % os.getpid())
@@ -327,7 +341,13 @@ def selftest(exe: str, keep_log: bool = False) -> int:
                                    "shots extra", "folder dialog",
                                    "dialog window", "ui driven", "ui gates", "ui log",
                                    "ui progress", "ui modal", "ui export", "ui no console",
-                                   "ui page gen", "window icon", "ui shots", "SELFTEST")):
+                                   "ui page gen", "window icon", "ui shots", "SELFTEST",
+                                   # CP-40
+                                   "ui strict", "ui exportsrc", "ui notice", "ui runbar",
+                                   "ui refill", "ui prog frame", "ui merge min",
+                                   # CP-41
+                                   "ui mergedry", "ui merge deploy", "ui guide scroll",
+                                   "ui language", "ui rollback", "ui merge rollback")):
             print("      | " + line)
     check(p.returncode == 0, "the frozen exe exited 0")
     check("WINDOW OK" in log or "SHELL SELFTEST: OK" in log or "UI SELFTEST: OK" in log,
@@ -422,6 +442,127 @@ def selftest(exe: str, keep_log: bool = False) -> int:
               "the fit row label wrapped/truncated (height %s): %s" % (fit_h, ol))
     except (IndexError, ValueError):
         check(False, "could not read the option row geometry: %s" % ol)
+    # ---- CP-40: -ExportSrc is a normal option row, and its switch really flips --
+    xs = line_of("ui exportsrc  :")
+    check("label='-ExportSrc'" in xs and "trunc=False" in xs and "h=16" in xs or
+          ("label='-ExportSrc'" in xs and "trunc=False" in xs),
+          "the -ExportSrc row is missing from the option list: %s" % xs)
+    check("on False->True" in xs and "form False->True" in xs,
+          "ticking -ExportSrc did not flip its switch / the build parameter: %s" % xs)
+    check("opt-exportsrc" in ol,
+          "the -ExportSrc row is not part of the option list: %s" % ol)
+    md = line_of("ui merge min")
+    check("card=" in md and "clip=0/" in md and "cardOver=0" in md,
+          "the merge card does not fit the minimum window: %s" % md)
+    # ---- CP-40: the protocol's hard rule must read as a rule -------------------
+    st = line_of("ui strict     :")
+    check("mark=True('!')" in st and "ruleSwitches=0" in st,
+          "the strict-conflict rule is not a badge + text (or the row itself still has a "
+          "switch): %s" % st)
+    check("color=rgb(247, 231, 141)" in st or "color=rgb(165, 129, 28)" in st,
+          "the strict rule is not gold: %s" % st)
+    # ---- CP-40: the run/cancel row never spills out of the form column ---------
+    for tag in ("ui runbar wide :", "ui runbar min  :"):
+        rb = line_of(tag)
+        try:
+            spill = int(rb.split("spill=")[1].split(" ")[0])
+            colo = int(rb.split("colOverflow=")[1].split(" ")[0])
+            check(spill <= 1 and colo <= 0,
+                  "the run/cancel row spills out of the form column: %s" % rb)
+        except (IndexError, ValueError):
+            check(False, "could not read the run-bar geometry: %s" % rb)
+    # ---- CP-40: the pre-flight card (before a merge task is started) -----------
+    for tag, want in (("ui notice empty   :", 3), ("ui notice bad path:", 1)):
+        nt = line_of(tag)
+        check("visible=True" in nt and "modal=''" in nt and "running=False" in nt,
+              "a bad merge input started a task / showed the outcome modal: %s" % nt)
+        try:
+            lines = int(nt.split("lines=")[1].split(" ")[0])
+            check(lines >= want,
+                  "the pre-flight card lists %d problem(s), expected >= %d: %s"
+                  % (lines, want, nt))
+        except (IndexError, ValueError):
+            check(False, "could not read the pre-flight card: %s" % nt)
+    nerr = log.split("               errors=")
+    check(len(nerr) >= 3 and "Mod 根目录未填写" in nerr[1] and "Paks" in nerr[1]
+          and "输出目录未填写" in nerr[1],
+          "the empty-input case does not list all three missing fields: %s"
+          % (nerr[1][:160] if len(nerr) > 1 else ""))
+    check(len(nerr) >= 3 and "不存在" in nerr[2],
+          "a Mods folder that does not exist is not reported as such: %s"
+          % (nerr[2][:160] if len(nerr) > 2 else ""))
+    shots = line_of("              : notice=")
+    check(all(n in shots for n in ("gui_shot_notice.png", "gui_shot_notice_bad.png",
+                                   "gui_shot_merge_min.png")),
+          "the CP-40 screenshots were not written: %s" % shots)
+    # ---- CP-41：合并自动安装 / 单包错误卡片 / 引导滚动 / 语言嗅探 --------------
+    md = line_of("ui mergedry   :")
+    check("rows=['opt-strict', 'opt-mergedry']" in md and "label='仅产出不安装'" in md
+          and "off=True" in md and "form False->True" in md,
+          "the merge mode is missing the 仅产出不安装 switch (default must be OFF): %s" % md)
+    md = line_of("ui merge deploy:")
+    check("ok=True" in md and "deployed=True" in md and "M7=True" in md,
+          "the merge did not auto-install (or the install stage M7 never ran): %s" % md)
+    check("txt=True" in line_of("               : backup="),
+          "no BACKUP.txt was written for the install: %s"
+          % line_of("               : backup="))
+    ns = line_of("ui notice single:")
+    check("visible=True" in ns and "lines=2" in ns and "modal=''" in ns
+          and "running=False" in ns and "Paks" in ns and "素材" in ns,
+          "the single-mode pre-flight card is wrong (it must list both paths and not "
+          "start a task): %s" % ns)
+    gs = line_of("ui guide scroll:")
+    try:
+        # 注意别用 `before`/`after` 这种名字：本函数开头就有一个同名的文件集合
+        # （"自检有没有在 Kit 里留下垃圾"），赋值会把它覆盖掉（CP-41 踩过）
+        g_before = int(gs.split("before=")[1].split(" ")[0])
+        g_during = int(gs.split("during=")[1].split("(")[0])
+        g_after = int(gs.split("after=")[1].split(" ")[0])
+        check(g_before > 0 and g_during < g_before and g_after == g_before
+              and "inView=True" in gs,
+              "the guide did not scroll the target into view / did not restore the "
+              "scroll position: %s" % gs)
+    except (IndexError, ValueError):
+        check(False, "could not read the guide scroll metrics: %s" % gs)
+    lg = line_of("ui lang sniff :")
+    try:
+        lg_lang = lg.split("lang=")[1].split(" ")[0]
+        lg_expect = lg.split("expect=")[1].split(" ")[0]
+        check(lg_lang == lg_expect and "stored=None" in lg and "persisted=en" in lg
+              and "after_reload=en" in lg,
+              "language sniffing / persistence is broken: %s" % lg)
+    except (IndexError, ValueError):
+        check(False, "could not read the language state: %s" % lg)
+    more = log.split("              : notice_single=")[1] if "notice_single=" in log else ""
+    check(all(n in log for n in ("gui_shot_notice_single.png", "gui_shot_merge_progress.png",
+                                 "gui_shot_merge_ok.png", "gui_shot_guide_scroll.png",
+                                 "gui_shot_lang_sniff.png")),
+          "a CP-41 screenshot is missing (notice_single / merge_progress / merge_ok / "
+          "guide_scroll / lang_sniff): %s ... %s" % (more[:90], line_of("              : lang_sniff=")))
+    # ---- CP-41b：右下角「回滚」按钮（单包 DryRun 置灰 / 真装可点 / 点了真回滚）----
+    rd = line_of("ui rollback dry:")
+    check("exists=True" in rd and "disabled=True" in rd
+          and "打开输出目录" in rd,
+          "the single-mode 回滚 button is missing (REGRESSION) or not greyed out after a "
+          "DryRun: %s" % rd)
+    rr = line_of("ui rollback run:")
+    check("deployed=True" in rr and "btn=True" in rr and "disabled=False" in rr
+          and "click={'clicked': True}" in rr,
+          "the single-mode 回滚 button cannot be clicked after a real deploy: %s" % rr)
+    check("rc=0" in rr or "uninstall.ps1" in rr,
+          "clicking 回滚 did not run uninstall.ps1: %s" % rr)
+    sand = line_of("               : sandbox ")
+    try:
+        parts = sand.split("sandbox ")[1].split(" -> ")
+        check(len(parts) == 3 and parts[0] != parts[1] and parts[2] == parts[0],
+              "the single-mode rollback did not restore the game folder: %s" % sand)
+    except (IndexError, ValueError):
+        check(False, "could not read the single-mode rollback snapshot: %s" % sand)
+    mr = line_of("ui merge rollback:")
+    check("btn=True" in mr and "disabled=False" in mr and "click={'clicked': True}" in mr,
+          "the merge-mode 回滚 button cannot be clicked after the auto-install: %s" % mr)
+    check("已回滚" in mr or "rc=0" in mr,
+          "the merge-mode rollback did not report success: %s" % mr)
     # ---- round 6: the community dialog (Octicon, one 2x2 grid, no scrollbar) --
     hi = line_of("hub icon      :")
     check("M10.226 17.284c-2.965-.36-5.054" in hi,
@@ -429,7 +570,7 @@ def selftest(exe: str, keep_log: bool = False) -> int:
     hg = line_of("hub grid      :")
     try:
         ws = hg.split("w=[")[1].split("]")[0].split(", ")
-        check("display=grid" in hg and "rows=2" in hg and len(set(ws)) == 1
+        check("display=grid" in hg and "buckets=2" in hg and len(set(ws)) == 1
               and int(ws[0]) > 100,
               "the four community buttons are not one 2x2 grid of equal buttons: %s" % hg)
     except (IndexError, ValueError):
@@ -539,6 +680,10 @@ def selftest(exe: str, keep_log: bool = False) -> int:
         headw = int(prog.split("head=")[1].split("p")[0])
         check(headw >= 68, "the chongci.gif head is 2x the original size (%d px)" % headw)
         check("rail 12px" in prog, "the rail is not back to 12 px: %s" % prog)
+        barh = int(prog.split("barH=")[1].split("p")[0])
+        check(56 <= barh <= 66 and headw >= 68,
+              "the progress frame was not narrowed to ~62 px, or the GIF head changed "
+              "size with it (CP-40): %s" % prog)
         railcy = int(prog.split("railCY=")[1].split(" ")[0])
         headcy = int(prog.split("headCY=")[1].split(" ")[0])
         barcy = int(prog.split("barCY=")[1].split(" ")[0])

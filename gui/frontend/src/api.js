@@ -36,6 +36,26 @@ export const api = {
       body: JSON.stringify(body)
     }).then(j)
   },
+  // CP-38: several mods -> one _P.  Same task/SSE/report plumbing as `start`.
+  merge(body) {
+    return fetch(url('/api/merge'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    }).then(j)
+  },
+  // read the Mods under a folder -- the backend auto-sniffs `manifest.json`
+  // (CP-40: it also generates the index / stages `_src` folders and answers with
+  // the effective `root`, which is the folder the merge will use)
+  listMods(dir) { return fetch(url('/api/mods', { dir })).then(j) },
+  // pre-flight a merge: {ok, errors[], warnings[]} -- drives the error card
+  validate(body) {
+    return fetch(url('/api/validate'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    }).then(j)
+  },
   report(id) { return fetch(url('/api/report/' + id)).then(j) },
   cancel(id) { return fetch(url('/api/cancel/' + id), { method: 'POST' }).then(j) },
   selectFolder(kind, dir) { return fetch(url('/api/select_folder', { kind, dir })).then(j) },

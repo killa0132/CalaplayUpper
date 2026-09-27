@@ -180,6 +180,35 @@ async function layout() {
   }
 }
 
+//: CP-41：引导为了把高亮元素拉进视口会自己滚动页面/左栏，退出时必须**恢复用户
+//: 原来的阅读位置**（不然看完引导回来发现页面跑掉了）。进入时快照、结束时还原，
+//: 通用到所有步骤 —— 不依赖具体某一步滚了哪里。
+const scrollSaved = ref([])
+function snapshotScroll() {
+  const saved = []
+  const seen = new Set()
+  const add = (el) => {
+    if (!el || seen.has(el) || !el.scrollTop) return
+    seen.add(el)
+    saved.push({ el, top: el.scrollTop })
+  }
+  add(document.scrollingElement)
+  const all = document.querySelectorAll('*')
+  for (let i = 0; i < all.length; i++) add(all[i])
+  scrollSaved.value = saved
+  return saved.length
+}
+function restoreScroll() {
+  let n = 0
+  for (const s of scrollSaved.value) {
+    try {
+      if (s.el && s.el.isConnected) { s.el.scrollTop = s.top; n += 1 }
+    } catch (e) { /* 元素没了就算了 */ }
+  }
+  scrollSaved.value = []
+  return n
+}
+
 function onResize() {
   if (!visible.value) return
   clearTimeout(timer)
@@ -207,10 +236,14 @@ function finish() {
   //: on every launch, so localStorage here was per-launch and the guide came
   //: back every single time.  See gui/prefs.py.
   setPref(KEY, '1')
+  //: 退出前先还原滚动位置（引导期间为了高亮滚过页面/左栏）
+  const back = restoreScroll()
   setTimeout(() => {
     visible.value = false
     leaving.value = false
     emit('done')
+    //: 还原放在动画之后再来一次：卡片消失会改变布局，可能把 scrollTop 夹住
+    if (back) setTimeout(restoreScroll, 0)
   }, 200)
 }
 function skip() { finish() }
@@ -221,6 +254,8 @@ function restart(from = 0) {
   step.value = Math.min(Math.max(0, from), steps.value.length - 1)
   leaving.value = false
   ready.value = false
+  //: 已经开着的时候（语言切换/重新布局）不要覆盖原来的快照
+  if (!visible.value) snapshotScroll()
   visible.value = true
   layout()
   nextTick(() => { ready.value = true })
@@ -243,6 +278,7 @@ onMounted(() => {
     //: it), the next launch must not nag again.  `restart()` (the "?" button)
     //: still re-opens it on demand.
     setPref(KEY, '1')
+    snapshotScroll()
     visible.value = true
     autoOpened.value = true
     nextTick(() => { ready.value = true })
@@ -295,8 +331,10 @@ function state() {
     })() : null,
     hole: hole.value ? { x: Math.round(hole.value.x), y: Math.round(hole.value.y),
                          w: Math.round(hole.value.w), h: Math.round(hole.value.h) } : null,
-    mask, stored
+    mask, stored,
+    //: CP-41：滚动快照/还原（自检用它证明"引导结束回到原位"）
+    scrollSaved: scrollSaved.value.length
   }
 }
-defineExpose({ state, next, prev, finish, skip, restart })
+defineExpose({ state, next, prev, finish, skip, restart, snapshotScroll, restoreScroll })
 </script>

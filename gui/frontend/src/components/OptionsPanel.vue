@@ -9,7 +9,7 @@
                  :max-shift="10" :item-gap="12" :smoothing="110"
                  @pick="onPick">
       <template #item="{ item }">
-        <span class="lab">
+        <span class="lab" :class="{ hard: item.hard }">
           <b><ScrambleText :text="item.label" nowrap /></b>
           <i v-if="item.hint"><ScrambleText :text="item.hint" /></i>
         </span>
@@ -23,6 +23,8 @@
                        :menu-min-width="216" :aria-label="t('opts.fit')"
                        @update:model-value="$emit('update:fit', $event)" />
         </span>
+        <span v-else-if="item.id === 'strict'" id="strict-mark" class="hard-mark"
+              :title="t('opts.strictHint')">!</span>
         <span v-else :id="'sw-' + item.id" class="uv-switch" role="switch"
               :aria-checked="on(item.id) ? 'true' : 'false'"
               :class="{ on: on(item.id) }"><i></i></span>
@@ -58,28 +60,50 @@ import { t } from '../i18n.js'
 
 const props = defineProps({
   fit: String, dryRun: Boolean, combined: Boolean, force: Boolean, noAtlas: Boolean,
-  ffmpeg: String, kit: String
+  exportSrc: Boolean,
+  //: 合并模式专用：勾上 = 只产出容器、不写游戏目录（等于单包的 -DryRun）
+  mergeDryRun: Boolean,
+  ffmpeg: String, kit: String,
+  // 'single' (default) = the original packing options; 'merge' = the CP-38 merge
+  // mode, whose only "option" is the protocol's always-on strict conflict rule
+  mode: { type: String, default: 'single' }
 })
 const emit = defineEmits(['update:fit', 'update:dryRun', 'update:combined', 'update:force',
-                          'update:noAtlas', 'update:ffmpeg', 'update:kit'])
+                          'update:noAtlas', 'update:exportSrc', 'update:mergeDryRun',
+                          'update:ffmpeg', 'update:kit'])
 
 const advOpen = ref(false)
 
-const rows = computed(() => [
-  { id: 'fit', domId: 'opt-fit', label: t('opts.fit') },
-  { id: 'dryRun', domId: 'opt-dryrun', label: t('opts.dryRun'), hint: t('opts.dryRunHint') },
-  { id: 'combined', domId: 'opt-combined', label: t('opts.combined'), hint: t('opts.combinedHint') },
-  { id: 'force', domId: 'opt-force', label: t('opts.force'), hint: t('opts.forceHint') },
-  { id: 'noAtlas', domId: 'opt-noatlas', label: t('opts.noAtlas'), hint: t('opts.noAtlasHint') },
-  { id: 'adv', domId: 'opt-adv', label: t('opts.adv'), hint: t('opts.advHint') }
-])
+const rows = computed(() => {
+  if (props.mode === 'merge') {
+    // 合并模式下只有两条：协议的硬性规定（`hard` = 金色加粗+感叹号徽章）与
+    // 「仅产出不安装」（默认关闭 ⇒ 合并后自动装进游戏）
+    return [{ id: 'strict', domId: 'opt-strict', label: t('opts.strict'),
+              hint: t('opts.strictHint'), hard: true },
+            { id: 'mergeDryRun', domId: 'opt-mergedry', label: t('opts.mergeDry'),
+              hint: t('opts.mergeDryHint') }]
+  }
+  return [
+    { id: 'fit', domId: 'opt-fit', label: t('opts.fit') },
+    { id: 'dryRun', domId: 'opt-dryrun', label: t('opts.dryRun'), hint: t('opts.dryRunHint') },
+    { id: 'combined', domId: 'opt-combined', label: t('opts.combined'), hint: t('opts.combinedHint') },
+    { id: 'force', domId: 'opt-force', label: t('opts.force'), hint: t('opts.forceHint') },
+    { id: 'noAtlas', domId: 'opt-noatlas', label: t('opts.noAtlas'), hint: t('opts.noAtlasHint') },
+    { id: 'exportSrc', domId: 'opt-exportsrc', label: t('opts.exportSrc'),
+      hint: t('opts.exportSrcHint') },
+    { id: 'adv', domId: 'opt-adv', label: t('opts.adv'), hint: t('opts.advHint') }
+  ]
+})
 
 function on(id) {
   if (id === 'dryRun') return !!props.dryRun
   if (id === 'combined') return !!props.combined
   if (id === 'force') return !!props.force
   if (id === 'noAtlas') return !!props.noAtlas
+  if (id === 'exportSrc') return !!props.exportSrc
+  if (id === 'mergeDryRun') return !!props.mergeDryRun
   if (id === 'adv') return advOpen.value
+  if (id === 'strict') return true     // the merge protocol is always strict
   return true                       // the fit row always shows a value
 }
 
@@ -98,8 +122,10 @@ function onPick(item) {
   else if (item.id === 'combined') emit('update:combined', !props.combined)
   else if (item.id === 'force') emit('update:force', !props.force)
   else if (item.id === 'noAtlas') emit('update:noAtlas', !props.noAtlas)
+  else if (item.id === 'exportSrc') emit('update:exportSrc', !props.exportSrc)
+  else if (item.id === 'mergeDryRun') emit('update:mergeDryRun', !props.mergeDryRun)
   else if (item.id === 'adv') advOpen.value = !advOpen.value
-  // 'fit' is driven by its own <select>
+  // 'fit' is driven by its own <select>; 'strict' is an always-on notice
 }
 defineExpose({ advOpen })
 </script>
@@ -112,6 +138,35 @@ defineExpose({ advOpen })
 .lab b { font-weight: 700; font-size: 13px; letter-spacing: .01em; white-space: nowrap;
          overflow: hidden; text-overflow: ellipsis; }
 .lab i { font-style: normal; font-size: 11.5px; line-height: 1.45; color: var(--ink-dim); }
+/* the merge protocol's hard rule: gold + bold, with an exclamation mark, so it
+   reads as a regulation and not as a switch someone could turn off */
+.lab.hard i {
+  color: var(--c1);
+  font-weight: 800;
+  letter-spacing: .3px;
+  text-shadow: 0 0 12px color-mix(in srgb, var(--c1) 45%, transparent);
+}
+html[data-theme='light'] .lab.hard i {
+  color: #a5811c;
+  text-shadow: none;
+}
+.hard-mark {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 21px; height: 21px;
+  border-radius: 50%;
+  font-weight: 900; font-size: 13.5px; line-height: 1;
+  color: #101418;
+  background: linear-gradient(135deg, var(--c1), var(--c2));
+  box-shadow: 0 0 12px -1px color-mix(in srgb, var(--c1) 70%, transparent);
+  animation: uv-hard-pulse 1.9s var(--ease) infinite;
+}
+@keyframes uv-hard-pulse {
+  0%, 100% { transform: scale(1); }
+  50%      { transform: scale(1.14); }
+}
 
 /* the on/off pill on the right of a line */
 .uv-switch {

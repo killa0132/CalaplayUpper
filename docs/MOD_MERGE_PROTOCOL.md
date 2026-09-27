@@ -86,7 +86,7 @@ mods/  ──(总索引 manifest.json)──►  每个 Mod 自己的 manifest.j
 {
   "name": "CalaplayUpper",
   "folder": "CalaplayUpper_src",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "author": "killa0132",
   "kind": "da_edit",
   "targets": {
@@ -301,7 +301,10 @@ if not rep.ok:
 4. **`scriptobjects.bin` 不放**（2026-09-27 与 Xenon-XG 确认）：实测 `retoc to-zen` 会忽略它——Xenon-XG 自己那份**已上机可用**的补丁容器也只有 `ExportBundleData + ContainerHeader`。蓝图字节码编辑不需要它。
    即使某个 Mod 的 `files` 里仍然声明了 `scriptobjects.bin`，合并器也会**显式跳过并记一条 NOTE**（不会报错，也绝不会进容器）——回归 **T30** 就是拿一个"老式"manifest 断言这条。
 5. **不安装**：合并器只产出容器。安装/卸载见 §10.1（真机安装脚本 `scripts\install_merged.ps1`：写前备份、写后读回、失败自动还原、一键回滚）。
-6. **不碰 GUI / 单 Mod 管线**：`core/builder.py`、`build_srcm.ps1` 一行未改；`core/merger.py` 独立成模块，只复用既有的 `Kit.to_zen` / `da-patch` 原语。
+6. **不碰 GUI / 单 Mod 管线**：`core/merger.py` 独立成模块，只复用既有的 `Kit.to_zen` / `da-patch` 原语；
+   合并逻辑没有一行进入 `core/builder.py`。
+   （v1.2.0 起 `core/builder.py` 多了一个**反向**的开关 `-ExportSrc`：单包打包顺手产出**符合本协议**的 Mod 源，
+   见 §12 —— 那是"产出 Mod"，不是"合并 Mod"，两件事仍然互不干扰。）
 7. **容器哈希不确定**（§7 末尾）：比对产物请用 `content_sha256` 或逐文件读回。
 8. 一次合并的耗时（真实数据）≈ **8 s**（含两轮读回与台账探测），中间目录峰值约 200 MB（=`-Base` 硬链接 + 合并后的 legacy 树，不含整包解包）。
 
@@ -326,8 +329,15 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install_merged.ps1
   脚本自身在「读回哈希不一致 / 原生容器或存档被改动」时也会**自动还原**。
 * 游戏在跑时会**在碰任何文件之前**拒绝（`_P` 被独占）。
 
-> **GUI「Mod 管理器」标签页**：按用户拍板**暂不做**——等真机验收通过与 Xenon-XG 对齐完成后再讨论。
-> 接口已经备好：`core.merger.merge_mods(mods_dir, base_paks, out_dir, selected_mods)` + `MergeReport.conflicts`。
+> **GUI 侧（2026-09-27 起）**：按用户拍板做了**局部切换**骨架（不做顶部全局 Tab）——左侧「素材与游戏 / INPUTS」卡片顶部两个小 Tab：
+> **单包打包**（默认，界面保持原样）/ **多 Mod 合并**；
+> 合并模式下：选 Mod 根目录（**递归嗅探**所有 `manifest.json` 并自动生成总索引，已有合法索引则优先用它；
+> 也可用 `;` 填多个目录 / 对话框多选，此时把 Mod **汇集到一个临时根目录**再合并）→ 列出 Mod（可勾选/移除）
+> → 「开始合并」（**合并前检查**会在缺失/可疑的输入上先弹一张错误卡片，而不是启动后才失败）；
+> 选项卡片只留「冲突时强制中断」（金色加粗 + 感叹号徽章），日志区与判据区**原样复用**（同一套 SSE + 合并报告）。
+> 后端 = `POST /api/merge`（`{mods|mod_dirs, paks, out, select[]}`）+ `GET /api/mods`（嗅探+索引）+ `POST /api/validate`（合并前检查）；
+> 接口仍是 `core.merger.merge_mods(mods_dir, base_paks, out_dir, selected_mods)` + `MergeReport.conflicts`。
+> 目录发现逻辑在 `gui/mods.py`（GUI 侧，不碰 `core/`）。
 
 ---
 
@@ -341,3 +351,44 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install_merged.ps1
 - [ ] `kind=ui_text`：`files` 里写全你改过的资产，**路径必须含 `Content` 段、保持 legacy 目录结构**。
 - [ ] 不要和别人的行号/文件路径相撞（撞了合并器会明确告诉你是谁撞了）。
 - [ ] 想被单独勾选/排除，无需改任何东西：合并器支持按名字选择（`-Select` / `selected_mods`）。
+- [ ] **不想手写 manifest？** 用本工具自己的单包打包 + `-ExportSrc`，它会按本协议生成一份（§12）。
+
+---
+
+## 12. 用本工具自产的 Mod（`-ExportSrc`，v1.2.0）
+
+单包打包时勾上 `-ExportSrc`，除了 `_P` 三件套还会写出**一份符合本协议的 Mod 源**：
+
+```
+<out_patch>/
+├── CalaPlayer-Windows_P.{pak,ucas,utoc}
+└── mod_src/
+    └── CalaplayUpper_src/          ← 名字来自 -SrcName（默认 CalaplayUpper）
+        ├── manifest.json
+        └── CalaPlayer/Content/...   ← 本次打包涉及的全部资产，**保留完整相对路径**
+```
+
+* `manifest.json` 由**容器里实际装了什么**派生：`files` = 除目标 DA 表以外的每个文件（`.uasset` 与 `.uexp` 分别列出），
+  `targets` = 本次在原生表上追加的行号区间（`appended_rows`，单包管线永远是追加，不改原生行）。
+  目标 DA 表本身作为**行源**放在 Mod 文件夹里，**不写进 `files`**（§3.4）。
+* `-Combined` 累积出来的资产业会一起导出；`-DryRun` 也会导出（它只跳过"写游戏目录"这一步）。
+* **两份自产 Mod 合并要换名字**：默认名字都是 `CalaplayUpper`、文件路径也完全一样 ⇒ 直接合并会撞 C3。
+  用 `-SrcName bgpack` / `-SrcName musicpack` 区分。
+
+怎么把 `mod_src/` 喂给合并器：
+
+| 场景 | 做法 |
+|---|---|
+| GUI | 「多 Mod 合并」→ Mod 根目录选 `out_patch\mod_src`（**就地生成总索引**）或直接选 `out_patch`（自动发现并把 Mod 汇集到临时根目录） |
+| CLI | `-Mods` 必须指向**含总索引的目录**。GUI 跑过一次就会在 `out_patch\mod_src\manifest.json` 留下索引；纯 CLI 时自己写两行即可 |
+
+```powershell
+# 纯 CLI：给 -ExportSrc 的产物补一个总索引（列几个 Mod 就写几条）
+'{"mods":[{"name":"CalaplayUpper","manifest":"CalaplayUpper_src/manifest.json"}]}' |
+    Set-Content -Encoding utf8 D:\out_patch\mod_src\manifest.json
+python cli\merge_mods.py -Mods D:\out_patch\mod_src -Base "<游戏 Paks>" -Out D:\merged
+```
+
+实测闭环（2026-09-27，同一套真实素材，`tests/mat/demo`）：单包 `-ExportSrc` → 合并 **M0~M6 全 PASS**，
+四张表 `DA_Backgrounds 165→167`（+2）、`DA_BGM 100→101`、`DA_Ambient 19→20`、`DA_Sounds 111→112`，
+合入 20 个文件（16 个资产 + 4 张表），容器 `_P.ucas` 10,870,721 B。这就等价于"把自己打包的那一包当成一个 Mod 参与合并"。

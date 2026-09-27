@@ -34,7 +34,11 @@ $bad = 0
 # `dist\release\` is NOT a Kit: it holds the zip attachments that go on the GitHub
 # Release (scripts\publish_release.ps1 uploads them).  Checking it as a Kit made
 # this script fail by design; skip it explicitly instead of carrying a red check.
-$kits = @(Get-ChildItem $dist -Directory | Where-Object { $_.Name -ne "release" } | Sort-Object Name)
+# Same for the release-handover folder (`dist\release_handover_<date>\`): it holds
+# the release notes / upload manifest / screenshots, not a runnable Kit.
+$kits = @(Get-ChildItem $dist -Directory | Where-Object {
+              $_.Name -ne "release" -and $_.Name -notlike "release_handover*" } |
+          Sort-Object Name)
 if (-not $kits) { Write-Host "dist\ has no Kit directories"; exit 0 }
 
 foreach ($k in $kits) {
