@@ -211,6 +211,238 @@ def build_material() -> dict:
 
 
 # --------------------------------------------------------------------------
+# mod-merger fixtures (PoC: core/merger.py)
+# --------------------------------------------------------------------------
+MERGE = os.path.join(MAT, "merge")
+_MERGE_FIX = {}
+
+
+def _merge_kit():
+    from core.common import Log as _Log
+    from core.kit import load_kit
+    return load_kit(KIT_DIR, None, _Log(echo=False), "T30")
+
+
+def _one_file(root: str, stem: str, ext: str) -> str:
+    hits = []
+    for dirpath, _dirs, files in os.walk(root):
+        for f in files:
+            if os.path.splitext(f)[0] == stem and f.endswith(ext):
+                hits.append(os.path.join(dirpath, f))
+    if len(hits) != 1:
+        raise Fail("merge fixture: %d hit(s) for %s%s under %s" % (len(hits), stem, ext, root))
+    return hits[0]
+
+
+def _write_json(path: str, obj) -> None:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8", newline="\n") as f:
+        json.dump(obj, f, indent=2, ensure_ascii=False)
+
+
+def build_merge_fixtures() -> dict:
+    """Mock mods for the merged-container scenarios (no dependency on a real mod repo):
+
+      * MockA  da_edit -- ships a DA_Backgrounds pair = native + ONE appended row
+                          (built here with the same `da-patch` primitives the pipeline uses)
+      * MockB  ui_text -- ships the native WBP_MainMenu pair, i.e. a whole-file override
+      * MockC  da_edit -- claims modified_rows [10], the SAME row MockA2 claims (row conflict)
+      * MockD  ui_text -- ships the SAME file MockB ships (file-path conflict)
+    """
+    if _MERGE_FIX:
+        return _MERGE_FIX
+    sys.path.insert(0, ROOT)
+    from core import da as DA
+    from core.da import BgRow
+    from core.common import Log as _Log
+    kit = _merge_kit()
+    lg = _Log(echo=False)
+    shutil.rmtree(MERGE, ignore_errors=True)
+    tmp = os.path.join(MERGE, "_tmp")
+
+    # ---- MockA: native table + one appended row (no new MI -> @30 is inherited)
+    #      the sandbox may carry an installed _P, so extract from a native-only copy
+    clean = os.path.join(tmp, "base_paks")
+    os.makedirs(clean, exist_ok=True)
+    for f in sorted(os.listdir(PAKS)):
+        src = os.path.join(PAKS, f)
+        if not os.path.isfile(src) or f.startswith(PKG):
+            continue
+        dst = os.path.join(clean, f)
+        try:
+            os.link(src, dst)
+        except OSError:
+            shutil.copy2(src, dst)
+    kit.to_legacy(clean, os.path.join(tmp, "da"), "DA_Backgrounds", lg, "T30")
+    base_ua = _one_file(os.path.join(tmp, "da"), "DA_Backgrounds", ".uasset")
+    native = struct.unpack_from("<I", open(os.path.splitext(base_ua)[0] + ".uexp", "rb").read(),
+                                8)[0]
+    mk = os.path.join(tmp, "mk")
+    ua, _idx = DA.add_names(kit, base_ua, mk,
+                            ["MergeMockA", "/Game/CalaPlayer/Backgrounds/mergemock_a",
+                             "mergemock_a"], lg, "T30")
+    ua = DA.append_bg_rows(kit, ua, mk, [BgRow("MergeMockA",
+                                               "/Game/CalaPlayer/Backgrounds/mergemock_a",
+                                               "mergemock_a")], native, lg, "T30")
+    mock_a_ua, mock_a_ux = ua, os.path.splitext(ua)[0] + ".uexp"
+
+    # ---- MockB: a native widget pair, re-shipped as a whole-file override
+    kit.to_legacy(clean, os.path.join(tmp, "wbp"), "WBP_MainMenu", lg, "T30")
+    wbp_ua = _one_file(os.path.join(tmp, "wbp"), "WBP_MainMenu", ".uasset")
+    wbp_rel = os.path.relpath(wbp_ua, os.path.join(tmp, "wbp")).replace("\\", "/")
+    wbp_ux = os.path.splitext(wbp_ua)[0] + ".uexp"
+
+    def put_da(tree: str, folder: str) -> None:
+        d = os.path.join(tree, folder)
+        os.makedirs(d, exist_ok=True)
+        shutil.copy2(mock_a_ua, os.path.join(d, "DA_Backgrounds.uasset"))
+        shutil.copy2(mock_a_ux, os.path.join(d, "DA_Backgrounds.uexp"))
+
+    def put_wbp(tree: str, folder: str) -> None:
+        d = os.path.join(tree, folder, *os.path.dirname(wbp_rel).split("/"))
+        os.makedirs(d, exist_ok=True)
+        base = os.path.basename(wbp_rel)
+        shutil.copy2(wbp_ua, os.path.join(d, base))
+        shutil.copy2(wbp_ux, os.path.join(d, os.path.splitext(base)[0] + ".uexp"))
+
+    def mod_manifest(tree: str, folder: str, name: str, kind: str, targets=None,
+                     files=None) -> None:
+        man = {"name": name, "folder": folder, "version": "1.0", "author": "regression",
+               "kind": kind, "targets": targets or {}, "files": files or []}
+        _write_json(os.path.join(tree, folder, "manifest.json"), man)
+
+    ok_tree = os.path.join(MERGE, "ok")
+    _write_json(os.path.join(ok_tree, "manifest.json"),
+                {"mods": [{"name": "MergeMockA", "manifest": "MockA/manifest.json"},
+                          {"name": "MergeMockB", "manifest": "MockB/manifest.json"}]})
+    put_da(ok_tree, "MockA")
+    mod_manifest(ok_tree, "MockA", "MergeMockA", "da_edit",
+                 targets={"DA_Backgrounds": {"appended_rows": [native]}})
+    put_wbp(ok_tree, "MockB")
+    # MockB also declares scriptobjects.bin (an old-style manifest): the merger must SKIP it
+    with open(os.path.join(ok_tree, "MockB", "scriptobjects.bin"), "wb") as f:
+        f.write(b"\x00" * 32)
+    mod_manifest(ok_tree, "MockB", "MergeMockB", "ui_text",
+                 files=[wbp_rel, os.path.splitext(wbp_rel)[0] + ".uexp", "scriptobjects.bin"])
+
+    c_tree = os.path.join(MERGE, "conflict_row")
+    _write_json(os.path.join(c_tree, "manifest.json"),
+                {"mods": [{"name": "MergeMockA2", "manifest": "MockA2/manifest.json"},
+                          {"name": "MergeMockC", "manifest": "MockC/manifest.json"}]})
+    for folder, nm in (("MockA2", "MergeMockA2"), ("MockC", "MergeMockC")):
+        put_da(c_tree, folder)
+        mod_manifest(c_tree, folder, nm, "da_edit",
+                     targets={"DA_Backgrounds": {"modified_rows": [10]}})
+
+    f_tree = os.path.join(MERGE, "conflict_file")
+    _write_json(os.path.join(f_tree, "manifest.json"),
+                {"mods": [{"name": "MergeMockB", "manifest": "MockB/manifest.json"},
+                          {"name": "MergeMockD", "manifest": "MockD/manifest.json"}]})
+    for folder, nm in (("MockB", "MergeMockB"), ("MockD", "MergeMockD")):
+        put_wbp(f_tree, folder)
+        mod_manifest(f_tree, folder, nm, "ui_text",
+                     files=[wbp_rel, os.path.splitext(wbp_rel)[0] + ".uexp"])
+
+    # missing 'files' -> an input error, not a conflict (files is mandatory for every kind)
+    n_tree = os.path.join(MERGE, "no_files")
+    _write_json(os.path.join(n_tree, "manifest.json"),
+                {"mods": [{"name": "MergeMockE", "manifest": "MockE/manifest.json"}]})
+    put_da(n_tree, "MockE")
+    _write_json(os.path.join(n_tree, "MockE", "manifest.json"),
+                {"name": "MergeMockE", "folder": "MockE", "kind": "da_edit",
+                 "targets": {"DA_Backgrounds": {"appended_rows": [native]}}})
+
+    _MERGE_FIX.update({"native_rows": native, "wbp_rel": wbp_rel, "ok": ok_tree,
+                       "conflict_row": c_tree, "conflict_file": f_tree,
+                       "no_files": n_tree})
+    return _MERGE_FIX
+
+
+def run_merge(tree: str, out: str, extra=None):
+    """Run the merger CLI (source, not the frozen exe -- the exe has no merge entry point)."""
+    py = os.path.join(ROOT, "python", "Scripts", "python.exe")
+    if not os.path.isfile(py):
+        py = sys.executable
+    argv = [py, os.path.join(ROOT, "cli", "merge_mods.py"),
+            "-Mods", tree, "-Base", PAKS, "-Out", out, "-Quiet"]
+    if KIT_DIR:
+        argv += ["-Kit", KIT_DIR]
+    argv += list(extra or [])
+    p = subprocess.run(argv, capture_output=True, timeout=900)
+    rep = None
+    rp = os.path.join(out, "merge_report.json")
+    if os.path.isfile(rp):
+        with open(rp, encoding="utf-8") as f:
+            rep = json.load(f)
+    return p.returncode, rep, p
+
+
+def _do_merge_scenario(sc, tag: str) -> str:
+    fx = build_merge_fixtures()
+    tree = fx[sc["srcm"]]
+    out = os.path.join(MERGE, "out_%s" % sc["id"])
+    shutil.rmtree(out, ignore_errors=True)
+    rc, rep, proc = run_merge(tree, out)
+    check(rep is not None, "%s no merge_report.json (rc=%d)\n%s"
+          % (tag, rc, (proc.stderr or b"").decode("utf-8", "replace")[-600:]))
+    check(rep["ok"] == sc["ok"], "%s expected ok=%s got ok=%s error=%s"
+          % (tag, sc["ok"], rep["ok"], rep.get("error")))
+    if not sc["ok"]:
+        check(rc != 0, "%s expected a non-zero exit code" % tag)
+        joined = " | ".join(rep["conflicts"]) or (rep.get("error") or "")
+        check(joined, "%s the failure carries no reason at all" % tag)
+        check(sc["err_has"] in joined, "%s the failure text does not mention %r: %s"
+              % (tag, sc["err_has"], joined))
+        if sc.get("conflicts"):
+            check(rep["conflicts"], "%s expected a conflict list, got %r"
+                  % (tag, rep["conflicts"]))
+        check(not rep["container"], "%s a container was reported despite the failure" % tag)
+        check(not os.path.isfile(os.path.join(out, "CalaPlayer-Windows_P.ucas")),
+              "%s a container file was left in the output folder" % tag)
+        return "%s OK (rc=%d, %d conflict(s) reported)" % (tag, rc, len(rep["conflicts"]))
+
+    check(rc == 0, "%s exit code %d" % (tag, rc))
+    for g in ("M0", "M1", "M2", "M3", "M4", "M5", "M6") + tuple(sc.get("gates_extra") or ()):
+        check(g in rep["gates"], "%s gate %s missing" % (tag, g))
+        check(rep["gates"][g]["ok"], "%s gate %s FAILED: %s" % (tag, g, rep["gates"][g]["detail"]))
+    native = fx["native_rows"]
+    tbl = rep["tables"].get("DA_Backgrounds") or {}
+    check(tbl.get("native") == native,
+          "%s the merge changed the native row count: %s != %s" % (tag, tbl.get("native"), native))
+    check(tbl.get("final") == native + 1,
+          "%s DA_Backgrounds should hold %d rows, got %s" % (tag, native + 1, tbl.get("final")))
+    check([m["name"] for m in rep["mods"]] == ["MergeMockA", "MergeMockB"],
+          "%s merged mods = %s" % (tag, [m["name"] for m in rep["mods"]]))
+    check(fx["wbp_rel"] in rep["files"],
+          "%s the ui_text mod's file is missing from the merged file list" % tag)
+    m5 = rep["gates"]["M5"]["detail"]
+    check("byte-identical" in m5, "%s M5 did not byte-check the mod assets: %s" % (tag, m5))
+    check("MergeMockA" in m5, "%s the appended row did not come back named: %s" % (tag, m5))
+    led = rep["ledger"]
+    check(led.get("override") == led.get("expected_override"),
+          "%s ledger %s override(s), %s expected" % (tag, led.get("override"),
+                                                     led.get("expected_override")))
+    check(led.get("new") == 0, "%s expected 0 brand-new packages, got %s" % (tag, led.get("new")))
+    # scriptobjects.bin must never be carried (confirmed with Xenon-XG 2026-09-27), even when
+    # a mod manifest declares it -- retoc would ignore it and the game reads the native global
+    check("scriptobjects.bin" not in rep["files"],
+          "%s scriptobjects.bin was carried into the merged container" % tag)
+    check(led.get("other_chunk_kinds") == ["ContainerHeader"],
+          "%s unexpected chunk kinds in the container: %s" % (tag, led.get("other_chunk_kinds")))
+    check(len(rep["container"].get("content_sha256") or "") == 64,
+          "%s the report has no content fingerprint" % tag)
+    for ext in ("pak", "ucas", "utoc"):
+        f = rep["container"]["files"][ext]
+        check(os.path.isfile(f["path"]), "%s %s was not produced" % (tag, ext))
+        check(os.path.getsize(f["path"]) == f["bytes"], "%s %s size mismatch" % (tag, ext))
+    return ("%s OK (ucas %s, DA_Backgrounds %d->%d, %d file(s), ledger %d new/%d override, "
+            "content %s)" % (tag, rep["container"]["files"]["ucas"]["sha16"],
+                             tbl["native"], tbl["final"], len(rep["files"]),
+                             led["new"], led["override"],
+                             rep["container"]["content_sha256"][:16]))
+
+
+# --------------------------------------------------------------------------
 # scenario runner
 # --------------------------------------------------------------------------
 class Fail(AssertionError):
@@ -340,6 +572,15 @@ SCENARIOS = [
     dict(id="T29", name="-Combined adds backgrounds on top of a previous build",
          srcm="threebg", seed="bgonly", args=["-DryRun", "-Combined"], ok=True, gates=True,
          gates_extra=("A9", "A9b", "A10"), post="combined_adds"),
+    # ---- unified mod-merge protocol (PoC): several mods -> ONE _P ---------------------------
+    dict(id="T30", name="merge: DA rows + whole-file mod assets -> one _P (no conflict)",
+         kind="merge", srcm="ok", ok=True),
+    dict(id="T31", name="merge: two mods claiming the same DA row -> conflict, nothing packed",
+         kind="merge", srcm="conflict_row", ok=False, err_has="DA_Backgrounds", conflicts=True),
+    dict(id="T32", name="merge: two mods shipping the same file -> file-path conflict",
+         kind="merge", srcm="conflict_file", ok=False, err_has="WBP_MainMenu", conflicts=True),
+    dict(id="T33", name="merge: a mod without the mandatory 'files' list is rejected",
+         kind="merge", srcm="no_files", ok=False, err_has="'files'"),
 ]
 
 
@@ -549,6 +790,8 @@ def do_scenario(sc, cmd_prefix, state):
 
 
 def _do_scenario(sc, cmd_prefix, state):
+    if sc.get("kind") == "merge":
+        return _do_merge_scenario(sc, "[%s] %-46s" % (sc["id"], sc["name"]))
     if sc.get("needs_bundled"):
         bundled = os.path.join(os.path.dirname(cmd_prefix[0]), "kit", "ffmpeg", "ffmpeg.exe")
         if not os.path.isfile(bundled):

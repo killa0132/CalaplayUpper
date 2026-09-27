@@ -316,7 +316,8 @@ kit/             self-contained 工具集：retoc / da-patch / tex-inspect /
 tools-src/       da-patch 与 tex-inspect 的 C# 源码（可用 dotnet publish 重新发布）
 python/          项目私有 venv（numpy / pillow / pyinstaller / pywebview / fastapi）
 tests/           回归与沙箱：
-  regression.py      29 场景 CLI 回归（出厂 exe + fakegame 沙箱 + 真机目录守护）
+  regression.py      33 场景 CLI 回归（出厂 exe + fakegame 沙箱 + 真机目录守护；
+                     T30~T33 是 Mod 合并器 PoC 的场景，走源码 CLI）
   run_regression.ps1 包装脚本
   gui_api_check.py   GUI 接口端到端（G1）
   gui_exe_check.py   冻结 GUI exe 的三项检查（G4）
@@ -992,7 +993,7 @@ python gui\desktop.py --selftest --selftest-ui --selftest-shell
 # 2) 接口层（G1）：令牌 403 / SSE / 与 CLI 判据逐项一致 / 真部署 + 回滚 / 取消
 python tests\gui_api_check.py
 
-# 3) CLI 29 场景回归（约 4 分钟，出厂 exe + fakegame 沙箱 + 真机目录守护）
+# 3) CLI 33 场景回归（约 8 分钟，出厂 exe + fakegame 沙箱 + 真机目录守护）
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\run_regression.ps1
 
 # 4) 重打交付件 + 验冻结 exe（G4：双击 / 无控制台启动 / 冻结自检）

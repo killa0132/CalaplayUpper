@@ -6,6 +6,22 @@
 
 ---
 
+## v1.1.0 — 2026-09-27（追加：多 Mod 共存）
+
+### 新增：统一 Mod 合并协议 —— `core/merger.py` + `cli/merge_mods.py` + `scripts\merge_mods.ps1`
+
+* 目标：多个 Mod **共存**而不是互相覆盖 —— 数据表**行级**改动（`kind=da_edit`）与整份资产**文件级**替换（`kind=ui_text`）合并成**同一个** `_P` 容器。
+* 用法：`python cli\merge_mods.py -Mods <总索引目录> -Base <干净 Paks> -Out <输出>`（或 `scripts\merge_mods.ps1`）。
+  总索引 `mods/manifest.json` 只列每个 Mod 自己的 manifest；每个 Mod 用 `name`/`folder`/`kind`/`targets`/`files` 声明改动范围（`files` **所有类型必填**，没有资产写 `[]`）。
+* 判据 **M0~M6**：输入自检 → 冲突检查 → 干净基底（从原生容器抽表，自动排除已装 `_P`）→ 行级合并（每次追加都做**只追加证明**）→ 文件合入（legacy 相对路径**绝不拍平**）→ 打包 + **容器读回**（行数 / 新增行的 key·pkg·obj / `@30` 数值未移动 / 每个 Mod `.uexp` **逐字节一致** / chunk 台账）→ 追加不重排（名字表与 ImportMap 语义转储）。
+* 冲突一律**报错并零打包**（四种）：同一张表的同一行被两个 Mod 声明 / 同一 Mod 重复声明 / 两个 Mod 提供同一文件路径 / `deleted_rows` 与别的 Mod 共用一张表。
+* 实测（真实数据：本工具的背景包 + Xenon-XG 的汉化包，对方 manifest 原样使用）：`DA_Backgrounds 165→167`、`DA_BGM 100→101`、合入 **54** 个文件、台账 **5 个全新包 / 23 个有意 override**、**26 个 `.uexp` 逐字节一致**、一次约 **8 s**；合并容器**已装真机并实测三样共存**（新增背景 + 新增 BGM + 中文界面）。
+* `scripts\install_merged.ps1`：合并产物的真机安装/回滚（默认 dry-run，`-Apply` 才装；写前把旧容器移动到备份、写后逐个 sha256 读回、原生容器或存档被改动即**自动还原**、`-Rollback` 一键回滚）。
+* **`scriptobjects.bin` 不再需要**（与 Xenon-XG 确认，2026-09-27）：`retoc to-zen` 会忽略它，补丁容器只需要 `ExportBundleData + ContainerHeader`；即使某个 Mod 的 manifest 仍声明了它，合并器也会**显式跳过**（回归 T30 断言它永不进容器）。
+* 回归新增 **T30**（无冲突合并）/ **T31**（行冲突）/ **T32**（文件冲突）/ **T33**（缺 `files` 被拒）⇒ 套件 **33 场景**。
+* 协议全文 `docs/MOD_MERGE_PROTOCOL.md`；给 Xenon-XG 的 review 材料 `docs/MOD_MERGE_PROTOCOL_REVIEW_XG.md`。
+* **本版不含 GUI 的「Mod 管理器」标签页**（等 Xenon-XG 确认协议后再做）；合并器目前以**源码 + 脚本**形式提供（四个 Kit zip 里不含它，因此 zip 哈希不变）。
+
 ## v1.1.0 — 2026-09-26
 
 ### 修复：新手引导只在第一次弹了（CP-37c）
