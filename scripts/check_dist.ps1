@@ -99,6 +99,34 @@ foreach ($k in $kits) {
     }
 }
 
+# ---- 4) the repo's own .ps1 files must stay ASCII-only ----------------------
+# Windows PowerShell 5.1 reads a BOM-less .ps1 as the *ANSI* code page, so a script that
+# contains non-ASCII text emits DOUBLE-ENCODED text.  That is not theory: build_gui.ps1
+# wrote the shipped GUI README as "????? / Start" instead of the intended Chinese
+# (found 2026-09-29 by reading the generated README back).  Keep this check so the red
+# line cannot be broken silently again.
+Write-Host "--- repo .ps1 files (must be ASCII only)"
+$scriptDirs = @($root, (Join-Path $root "scripts"), (Join-Path $root "tests"))
+$scriptCount = 0
+$scriptBad = 0
+foreach ($d in $scriptDirs) {
+    if (-not (Test-Path $d)) { continue }
+    foreach ($s in @(Get-ChildItem $d -Filter *.ps1 -File -ErrorAction SilentlyContinue)) {
+        $scriptCount++
+        $n = 0
+        foreach ($b in [System.IO.File]::ReadAllBytes($s.FullName)) { if ($b -gt 127) { $n++ } }
+        if ($n -gt 0) {
+            $scriptBad++
+            Write-Host ("    FAIL {0}: {1} non-ASCII byte(s)" -f $s.Name, $n)
+        }
+    }
+}
+if ($scriptBad -eq 0) {
+    Write-Host ("    OK   {0} script(s), all ASCII" -f $scriptCount)
+} else {
+    $bad += $scriptBad
+}
+
 Write-Host ""
 if ($bad) { Write-Host ("dist check: FAILED ({0} problem(s))" -f $bad); exit 1 }
 Write-Host ("dist check: OK -- {0} Kit(s), every file accounted for" -f $kits.Count)

@@ -606,6 +606,27 @@ def _export_log_empty_case(port: int) -> dict:
         return {"ok": None, "err": "%s: %s" % (type(e).__name__, e)}
 
 
+def _export_log_dry(port: int, task_id: str) -> dict:
+    """`dry=1`：只跑到"参数都合法"为止，不弹原生保存框、不写盘。
+
+    这条分支以前是**零覆盖**的：自检永远带 `path`（脚本捷径），于是"弹保存框"那条只有用户
+    会走的路径里的 `ValueError` 一直 500 到用户手上才发现（2026-09-29 的"导出失败:
+    Internal Server Error"）。`dry=1` 让自检能覆盖到参数校验这一段。
+    """
+    if not task_id:
+        return {"ok": False, "err": "no task id"}
+    url = ("http://127.0.0.1:%d/api/export_log/%s?dry=1&t=%s"
+           % (port, urllib.parse.quote(task_id), gui_app.TOKEN))
+    try:
+        req = urllib.request.Request(url, method="POST")
+        with urllib.request.urlopen(req, timeout=15) as r:
+            body = json.loads(r.read().decode("utf-8"))
+    except Exception as e:  # noqa: BLE001
+        return {"ok": None, "err": "%s: %s" % (type(e).__name__, e)}
+    body["status_ok"] = True
+    return body
+
+
 def _export_log_over_http(port: int, task_id: str) -> dict:
     """Verify the failure modal's 导出错误日志 button end to end.
 
@@ -636,6 +657,7 @@ def _export_log_over_http(port: int, task_id: str) -> dict:
         body["head"] = txt[:200].replace("\n", " | ")
         body["mentions_task"] = task_id in txt
     body["empty_case"] = _export_log_empty_case(port)
+    body["dry_case"] = _export_log_dry(port, task_id)
     return body
 
 
@@ -1615,6 +1637,10 @@ def main(argv=None) -> int:
     _selftest_prefs = os.path.join(os.environ.get("TEMP") or os.path.expanduser("~"),
                                    "cala-selftest-prefs-%d" % os.getpid())
     os.environ["CALA_PREFS_DIR"] = _selftest_prefs
+    # CP-42：图集占用的实测结果也走替身目录 —— 自检不许写用户真实的 %LOCALAPPDATA%\...\cache
+    _selftest_cache = os.path.join(os.environ.get("TEMP") or os.path.expanduser("~"),
+                                   "cala-selftest-cache-%d" % os.getpid())
+    os.environ["CALA_CACHE_DIR"] = _selftest_cache
     try:
         os.makedirs(_selftest_prefs, exist_ok=True)
     except OSError:
@@ -2354,8 +2380,10 @@ def main(argv=None) -> int:
                                                                  R["ui_fail"].get("notice"),
                                                                  (R["ui_fail"].get("error") or "")[:90]))
         ex = R["export"]
-        say("ui export log : ok=%s bytes=%s lines=%s empty_case=%s %s"
+        say("ui export log : ok=%s bytes=%s lines=%s dry=%s dry_files=%s empty_case=%s %s"
               % (ex.get("ok"), ex.get("bytes"), ex.get("lines"),
+                 (ex.get("dry_case") or {}).get("ok"),
+                 len((ex.get("dry_case") or {}).get("file_types") or []),
                  ex.get("empty_case", {}).get("message"), ex.get("err") or ""))
         nw = R["nowin"]
         say("ui no console : installed=%s parent_has_console=%s calls=%s "
@@ -3010,6 +3038,13 @@ def main(argv=None) -> int:
         bad((ex.get("empty_case") or {}).get("message") == "暂无日志可导出",
             "the 'nothing to export' case must answer 暂无日志可导出, got %s"
             % ex.get("empty_case"))
+        # CP-42：`dry=1`（用户按钮真正走的那条：弹保存框）必须不再 500，且过滤器已经是
+        # pywebview 认的 "描述 (*.a;*.b)" 形式（旧的 Win32 写法会抛 ValueError）
+        dc = ex.get("dry_case") or {}
+        bad(dc.get("ok") is True,
+            "the dry=1 export path failed (this is the branch the user's button takes): %s" % dc)
+        bad((dc.get("file_types") or []) == ["日志 (*.log;*.txt)", "所有文件 (*.*)"],
+            "the SAVE dialog filters are not the pywebview-legal pair: %s" % dc.get("file_types"))
         # ---- no CMD black boxes ------------------------------------------------
         nw = R["nowin"]
         bad(nw.get("installed") is True, "the CREATE_NO_WINDOW patch is not installed: %s" % nw)

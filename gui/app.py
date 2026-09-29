@@ -279,15 +279,20 @@ def create_app() -> FastAPI:
         return {"canceled": tasks.request_cancel(task_id)}
 
     # ---------------------------------------------------------- export the log
-    @app.post("/api/export_log/{task_id}")
-    def export_log(task_id: str, path: str = Query("")) -> Dict[str, Any]:
-        """Failure-modal helper: save this build's whole log to a text file.
+    #: pywebview 只认 "描述 (*.a;*.b)" 这种过滤器写法（原因见 export_log 的注释）
+    LOG_FILE_TYPES = ("日志 (*.log;*.txt)", "所有文件 (*.*)")
 
-        `path` is for scripts/self-tests (write straight there, no dialog).
-        Without it we ask the user where to put it through the same native
-        pywebview dialog machinery as /api/select_folder.  A build that died
-        before it logged anything is NOT an error: it comes back as
-        {"ok": false, "message": "暂无日志可导出"} so the page can say so.
+    @app.post("/api/export_log/{task_id}")
+    def export_log(task_id: str, path: str = Query(""), dry: int = Query(0)) -> Dict[str, Any]:
+        """失败弹窗的助手：把这一轮构建的完整日志存成一个文本文件。
+
+        `path` 给脚本/自检用（直接写到那儿，不弹框）；`dry=1` 只走到"参数都合法"
+        为止，不弹框也不写盘 —— 自检用它覆盖这条分支（否则这条只有用户会走的
+        路径永远是零覆盖）。
+
+        **这个接口在任何情况下都不许 500**：它是在构建已经失败之后才被点的，
+        自己再炸一次只会让用户连日志都拿不到。所以每个环节都兜住，回
+        {"ok": false, "reason": ..., "message": ...}，让页面有话说。
         """
         t = tasks.get(task_id)
         text = _log_text(t)
@@ -295,25 +300,41 @@ def create_app() -> FastAPI:
             return {"ok": False, "reason": "empty", "message": "暂无日志可导出"}
 
         target = (path or "").strip()
-        if not target:
+        if not target and not dry:
             if WINDOW is None:
-                raise HTTPException(501, "no desktop window (browser-only mode)")
-            import webview
+                return {"ok": False, "reason": "no_window",
+                        "message": "浏览器模式没有原生保存框，请用 ?path=<文件> 指定目标"}
+            try:
+                import webview
 
-            res = WINDOW.create_file_dialog(
-                webview.FileDialog.SAVE,
-                directory=os.path.expanduser("~"),
-                save_filename="CalaPlayerSrcmBuilder_%s.log" % t.id,
-                file_types=("日志 (*.log;*.txt)", "*.log;*.txt", "所有文件 (*.*)", "*.*"))
+                res = WINDOW.create_file_dialog(
+                    webview.FileDialog.SAVE,
+                    directory=os.path.expanduser("~"),
+                    save_filename="CalaPlayerSrcmBuilder_%s.log" % t.id,
+                    # ⚠️ 只能给 pywebview 认的 "描述 (*.a;*.b)" 形式：它会先对每个过滤器
+                    # 调 parse_file_type() 严格校验，而那句校验**在平台层的 try 之外**
+                    # ⇒ 传统 Win32 写法（"*.log;*.txt" / "*.*"）会抛 ValueError、逃逸成
+                    # 未捕获异常、变成纯文本 500（用户 2026-09-29 报的"导出失败:
+                    # Internal Server Error"就是这个）。
+                    file_types=LOG_FILE_TYPES)
+            except Exception as e:  # noqa: BLE001
+                return {"ok": False, "reason": "error",
+                        "message": "导出失败：调用保存对话框出错（%s: %s）"
+                                   % (type(e).__name__, e)}
             if not res:
                 return {"ok": False, "reason": "cancelled", "message": "已取消导出"}
             target = res if isinstance(res, str) else res[0]
+
+        if dry:
+            return {"ok": True, "dry": True, "bytes": len(text.encode("utf-8")),
+                    "file_types": list(LOG_FILE_TYPES)}
 
         try:
             with open(target, "w", encoding="utf-8", newline="\n") as fh:
                 fh.write(text)
         except OSError as e:
-            raise HTTPException(500, "cannot write %s: %s" % (target, e))
+            return {"ok": False, "reason": "error",
+                    "message": "导出失败：无法写入 %s（%s）" % (target, e)}
         return {"ok": True, "path": target, "bytes": len(text.encode("utf-8"))}
 
 

@@ -191,8 +191,8 @@ foreach ($e in $EXTS) {
     if (Test-Path -LiteralPath $p) { $lines += ("  " + $PKG + "." + $e + "  " + (Sha16 $p) + "  " + (Get-Item -LiteralPath $p).Length + " B") }
 }
 $lines += ""
-$lines += "ultra-safe fallback (an older patch, if you ever need it):"
-$lines += "  D:\dsharnessProject\CalaplayUpper\work_cp35\atlas_verify\out_patch\uninstall.ps1"
+$lines += "ultra-safe fallback: keep your own copy of the previous container somewhere"
+$lines += "  outside out_patch (this folder can be overwritten by a later install)."
 $lines += ""
 $lines += "native containers (unchanged):"
 foreach ($k in ($nativesBefore.Keys | Sort-Object)) { $lines += ("  " + $k + "  " + $nativesBefore[$k]) }

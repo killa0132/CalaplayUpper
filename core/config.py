@@ -238,13 +238,38 @@ ATLAS_CELL_W, ATLAS_CELL_H = 250, 141
 ATLAS_STRIDE_X, ATLAS_STRIDE_Y = 252, 143
 ATLAS_COLS, ATLAS_ROWS = 16, 14
 ATLAS_SLOTS = ATLAS_COLS * ATLAS_ROWS
-ATLAS_FIRST_CELL = 165                    # == the game's occupied count (measured)
-ATLAS_MAX_CELLS = ATLAS_SLOTS - ATLAS_FIRST_CELL      # 59
+# ⚠️ 下面两个是**旧版游戏**（2026-09-29 之前）的实测值，只作兜底/日志参考：
+# 现在真正的分配一律走 `core/atlas_cells.measure()` 的运行时实测（新版游戏首个空闲是 166、
+# 空位 58）。别再拿它们当"游戏占了几格"的事实来源。
+ATLAS_FIRST_CELL = 165                    # == 旧版游戏的占用数（已过期，见上）
+ATLAS_MAX_CELLS = ATLAS_SLOTS - ATLAS_FIRST_CELL      # 59（旧值）
 
 
 def atlas_cell_xy(index: int):
     """The game's own grid formula for cell `index`."""
     return (index % ATLAS_COLS) * ATLAS_STRIDE_X, (index // ATLAS_COLS) * ATLAS_STRIDE_Y
+
+
+def atlas_cell_index(x: float, y: float) -> int:
+    """`atlas_cell_xy` 的逆：格坐标 -> 格子号；不在格线上/越界返回 -1。"""
+    if x < 0 or y < 0 or x % ATLAS_STRIDE_X or y % ATLAS_STRIDE_Y:
+        return -1
+    col, row = int(x) // ATLAS_STRIDE_X, int(y) // ATLAS_STRIDE_Y
+    if col >= ATLAS_COLS or row >= ATLAS_ROWS:
+        return -1
+    return row * ATLAS_COLS + col
+
+
+def cache_dir() -> str:
+    """机器级缓存目录（"只跟游戏版本有关"的实测结果放这儿）。
+
+    `CALA_CACHE_DIR` 可覆盖它 —— 自检/回归指向替身目录，绝不碰用户真实数据。
+    """
+    env = os.environ.get("CALA_CACHE_DIR")
+    if env:
+        return env
+    base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
+    return os.path.join(base, "CalaPlayerSrcmBuilder", "cache")
 
 
 def mi_scalars_atlas(index: int) -> Dict[str, float]:

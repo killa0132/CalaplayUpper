@@ -67,7 +67,8 @@ def tile_from_canvas(canvas) -> np.ndarray:
 
 def stage_atlas(base_uexp: str, base_uasset: str,
                 cells: Sequence[Tuple[int, np.ndarray]], out_dir: str, log: Log,
-                stage: str = "L2b", dump_sizes: Optional[Sequence[int]] = None) -> Dict:
+                stage: str = "L2b", dump_sizes: Optional[Sequence[int]] = None,
+                native_cells: Optional[Sequence[int]] = None) -> Dict:
     """Copy the atlas into ``out_dir``, embed every (index, tile), prove it, report.
 
     Returns ``{"uexp","uasset","bytes","plan","cells":[...],"quality":[...],"a9":{...},"sha256"}``.
@@ -92,7 +93,8 @@ def stage_atlas(base_uexp: str, base_uasset: str,
         reps.append(embed(data, plan, index, tile, log, stage))
     if len(data) != len(orig):
         raise BuildError(stage, "the atlas changed length (%d -> %d)" % (len(orig), len(data)))
-    v = verify(orig, bytes(data), plan, [i for i, _t in cells], log, stage)
+    v = verify(orig, bytes(data), plan, [i for i, _t in cells], log, stage,
+               native_cells=native_cells)
     q = [dict(cell_quality(bytes(data), plan, index, tile, log, stage), index=index)
          for index, tile in cells]
     if open(dst_uasset, "rb").read() != ua_before:
@@ -101,10 +103,19 @@ def stage_atlas(base_uexp: str, base_uasset: str,
     back = open(dst_uexp, "rb").read()
     if len(back) != len(orig):
         raise BuildError(stage, "the written atlas does not read back at %d B" % len(orig))
-    if hashlib.sha256(back).digest() == hashlib.sha256(orig).digest():
-        raise BuildError(stage, "the atlas is byte identical to the original: nothing was embedded")
-    log(stage, "  atlas staged: %s (%d B, %d cell(s), uasset untouched)"
-        % (os.path.basename(dst_uexp), len(back), len(cells)))
+    same = hashlib.sha256(back).digest() == hashlib.sha256(orig).digest()
+    if same:
+        # 写回与基底逐字节相同**不一定是错误**：基底里可能已经放着我们要写的那张 tile
+        # （同一份素材的第二次打包、或 -Combined 带着上一轮的格子）⇒ 合法的空操作。
+        # 只有"字节没变化"却又"embed 报告改动过块"才是自相矛盾，那才是真出了事。
+        touched = sum(int(r.get("changed_blocks", 0)) for r in reps)
+        if touched:
+            raise BuildError(stage, "the atlas is byte identical to the base but embed() "
+                                    "reported %d changed block(s) -- inconsistent" % touched)
+        log(stage, "  NOTE: nothing to write -- the base already carries this tile "
+                   "(%d cell(s), 0 block(s) changed); the atlas ships unchanged" % len(cells))
+    log(stage, "  atlas staged: %s (%d B, %d cell(s)%s)"
+        % (os.path.basename(dst_uexp), len(back), len(cells), ", no-op" if same else ""))
     return {"uexp": dst_uexp, "uasset": dst_uasset, "bytes": len(back), "plan": plan,
             "cells": reps, "quality": q, "a9": v,
             "sha256": hashlib.sha256(back).hexdigest()}
@@ -266,7 +277,8 @@ def embed(data: bytearray, plan: AtlasPlan, index: int, tile: np.ndarray,
         raise BuildError(stage, "tile is %dx%d, the atlas cell is %dx%d"
                          % (tile.shape[1], tile.shape[0], CELL_W, CELL_H))
     cell_x, cell_y = cell_origin(index)
-    rep = {"index": index, "x": cell_x, "y": cell_y, "mips": [], "blocks": 0}
+    rep = {"index": index, "x": cell_x, "y": cell_y, "mips": [], "blocks": 0,
+           "changed_blocks": 0}
     for (k, off, size, w, h, bw) in plan.mips:
         x0, y0, x1, y1 = _mip_cell_rect(cell_x, cell_y, k)
         if x1 > w or y1 > h:
@@ -289,6 +301,12 @@ def embed(data: bytearray, plan: AtlasPlan, index: int, tile: np.ndarray,
         enc = bc1_encode(img)
         if len(enc) != rw * rh * 8:
             raise BuildError(stage, "mip%d region encoded %d B, expected %d" % (k, len(enc), rw * rh * 8))
+        # 这次改写到底动了几个块：把新编码的字节与原区域逐块比一遍。幂等重跑（基底里
+        # 已经放着同一张 tile）会得到 0 —— stage_atlas 的"内容必须变化"守卫靠这个数字
+        # 把**合法空操作**与"embed 根本什么都没干"分开（不靠画质阈值）。
+        for j in range(rw * rh):
+            if enc[j * 8:(j + 1) * 8] != region[j * 8:(j + 1) * 8]:
+                rep["changed_blocks"] += 1
         for j, by in enumerate(range(by0, by1)):
             a = off + (by * bw + bx0) * 8
             data[a:a + rw * 8] = enc[j * rw * 8:(j + 1) * rw * 8]
@@ -307,14 +325,19 @@ CELL_BLOCKS = ((CELL_W + 3) // 4) * ((CELL_H + 3) // 4)
 
 
 def verify(orig: bytes, new: bytes, plan: AtlasPlan, indices: Sequence[int],
-           log: Log, stage: str = "L1") -> Dict:
+           log: Log, stage: str = "L1",
+           native_cells: Optional[Sequence[int]] = None) -> Dict:
     """A9 + A9b straight off the two byte strings.
 
     A9 : per mip, {blocks whose 8 bytes differ} must be a subset of the blocks covering our cells
          (allowed to be larger by the block rounding the embed itself did - compared exactly).
     A9b: per mip, decode both versions and measure the difference **inside every native cell's
-         sampled rectangle** (index 0..164).  mip0 must be exactly zero; the other mips report the
-         count and the max channel delta (the one-block seam described in the module docstring).
+         sampled rectangle**.  mip0 must be exactly zero; the other mips report the count and the
+         max channel delta (the one-block seam described in the module docstring).
+
+    `native_cells` = 原生图集实际占用的格子（``core.atlas_cells.measure()`` 实测）。不传就退回
+    旧常数 0..NATIVE_CELLS-1。**必须传**：2026-09-29 用户重装游戏后原生占了第 165 格，用旧范围
+    时"我们往 165 写"这一层污染会被 A9b 放过。
     """
     if len(orig) != len(new):
         raise BuildError(stage, "atlas length changed (%d -> %d)" % (len(orig), len(new)))
@@ -350,7 +373,7 @@ def verify(orig: bytes, new: bytes, plan: AtlasPlan, indices: Sequence[int],
             iN = decode_bc1(new[off:off + size], w, h).astype(np.int16)
             d = np.abs(io - iN).max(axis=2)
             nat = np.zeros(d.shape, dtype=bool)
-            for i in range(NATIVE_CELLS):
+            for i in (native_cells if native_cells is not None else range(NATIVE_CELLS)):
                 cx, cy = cell_origin(i)
                 x0 = cx >> k
                 y0 = cy >> k

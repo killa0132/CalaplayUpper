@@ -101,7 +101,7 @@ def tool_version() -> str:
         from .builder import TOOL_VERSION
         return str(TOOL_VERSION)
     except Exception:
-        return "1.2.0"
+        return "1.2.1"
 
 
 # --------------------------------------------------------------------------

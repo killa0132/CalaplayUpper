@@ -706,6 +706,11 @@ def selftest(exe: str, keep_log: bool = False) -> int:
     check("ui export log : ok=True" in log and "empty_case=暂无日志可导出" in log,
           "the error log exports and the empty case answers 暂无日志可导出: %s"
           % line_of("ui export log :"))
+    # CP-42: 用户按钮真正走的那条分支（弹原生保存框）以前是零覆盖的 —— 它的过滤器写法不合法
+    # 会直接 500。现在 dry=1 必须返回 ok=True 且过滤器是 pywebview 认的那一对。
+    check("dry=True dry_files=2" in log,
+          "the export-log dry path (the branch the user's button takes) is broken: %s"
+          % line_of("ui export log :"))
     # this one is ONLY meaningful in a console-less build like the shipped exe
     nw = line_of("ui no console :")
     check("installed=True" in nw and "patched_hwnd=0" in nw and "last_flags_no_window=True" in nw,

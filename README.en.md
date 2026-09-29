@@ -124,7 +124,8 @@ The UI has a few options; beginners can ignore them.
 | Force | Force the build when the material exceeds the default limits |
 | ExportSrc | Also write a **mergeable Mod source** (`mod_src/<name>_src/`) that can be fed straight into *Multi-mod merge* |
 
-Default limits: ≤ 59 backgrounds, ≤ 10 minutes of audio, image quality ≥ 25 dB.
+Default limits: backgrounds ≤ the **preview atlas' free cells** (measured at build time; 57 for this
+game build), ≤ 10 minutes of audio, image quality ≥ 25 dB.
 
 ## 🤝 Several mods at once (v1.2.0)
 
@@ -154,11 +155,14 @@ The field-level protocol (for mod authors) is in
 * The **timeline cell** and the editor's right-hand **“Background” preview block** now **do show a
   background you added** (since v1.1.0).
   * How (static, no resident injection): each new background's 250×141 thumbnail is **appended to the
-    game's own preview atlas `T_BackgroundPreviews`** (in the free cells at the end, index 165+), and
+    game's own preview atlas `T_BackgroundPreviews`** (in the free cells at the end, starting at the
+    **measured** first free cell), and
     that background's preview material is pointed at that cell. The game itself hands the cell's
     coordinates to both widgets.
-  * Because the atlas only has 59 free cells, the **background limit is 59** (`-Force` goes beyond it,
-    and the extra backgrounds' thumbnails will not show).
+  * The **background limit equals the atlas' remaining free cells** (measured by the tool from the
+    game's own data at build time — 57 for this game build; `-Force` goes beyond it, and the extra
+    backgrounds' thumbnails will not show). This number follows the game: update the game and it
+    re-measures itself.
 * The **dropdown thumbnail gets slightly softer (about 30 %)**: due to the game's native rendering
   path (that thumbnail samples only the single atlas cell, and the GPU's mip selection lands on a
   blend of two levels) the little list thumbnail is a bit softer than before — **but not perceptible
@@ -184,6 +188,18 @@ The field-level protocol (for mod authors) is in
 * You need to own **CalaPlayer itself**. This tool only packs your material; it does not include the game.
 
 ## 🆕 Changelog
+
+**v1.2.1 (2026-09-30)** — two real bug fixes plus one clarification (backward compatible):
+
+* **Fixed a false L2 failure**: packing into the *same* output folder **twice** (second run without
+  *accumulate*) used to die with `the atlas is byte identical to the original`; a non-accumulating run now
+  always rebuilds from the game's own atlas, and a *legitimately* byte-identical rewrite is accepted
+  (logged as a no-op) instead of being treated as an error.
+* **Fixed “Export error log” returning 500**: the failure dialog's button used filter strings that pywebview
+  rejects; it now opens the save dialog and writes the full log, and **that endpoint can no longer 500**.
+* **The background limit is measured at build time**: how many preview-atlas cells are free is read from the
+  game's own data (this game build: **57 free**, first free cell 167). It follows the game automatically.
+  ⚠️ This also corrects an old number: the “59 free cells” in earlier docs was the *previous* game build.
 
 **v1.2.0 (2026-09-27)** — backward-compatible feature additions: single-package packing and
 multi-mod merging are now one pipeline:

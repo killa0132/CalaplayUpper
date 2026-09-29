@@ -277,7 +277,19 @@ def rollback(backup: str, paks_dir: str, base: str = DEFAULT_BASE,
     live = trios(paks_dir, base)
     bak = trios(real_p, base)
     if not trio_exists(bak):
-        raise BuildError(stage, "备份目录里没有补丁容器三件套", real_p)
+        # 安装前这个目录里**本来就没有**补丁容器（用户的游戏是干净的）⇒ "回滚"就是把我们
+        # 装进去的那份删掉、回到干净状态。旧代码在这里直接报"备份目录里没有三件套"，于是
+        # 干净机器上**装完就再也回不去了**（2026-09-29 沙箱重新对齐到"无补丁"后 G4 抓到）。
+        removed = []
+        for e in EXTS:
+            if os.path.isfile(live[e]):
+                os.remove(live[e])
+                removed.append("%s.%s" % (base, e))
+        info = {"ok": True, "target": paks_dir, "from": real_p, "restored": {},
+                "clean": True, "removed": removed}
+        say(stage, "回滚完成：安装前这里没有任何补丁容器 ⇒ 已删掉我们装进去的 %s，"
+                   "游戏目录回到干净状态" % (", ".join(removed) if removed else "（本来就没有）"))
+        return info
     say(stage, "回滚：还原 %s 里的容器" % real_p)
     for e in EXTS:
         if os.path.isfile(live[e]):

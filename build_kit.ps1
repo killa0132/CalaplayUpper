@@ -105,7 +105,8 @@ SWITCHES
   -DryRun           run L0..L4 only, never touch the game folder
   -Combined         accumulate on top of the previous out_patch build instead of
                     rebuilding from the native tables only
-  -Force            override the limits (bg <= 50, audio <= 10 min, PSNR >= 25 dB)
+  -Force            override the limits (bg <= the preview atlas' free cells,
+                    audio <= 10 min, PSNR >= 25 dB)
   -Ffmpeg <exe>     explicit ffmpeg path
   -Kit <dir>        explicit kit folder
   -KeepWork         keep the previous build tree for debugging

@@ -117,11 +117,11 @@ QUICK START
        material root     - a folder containing bg / BGM / Sound / Ambient
 3. Tick "DryRun" the first time: it builds the container and runs every check
    WITHOUT touching the game folder.
-4. Press 开始打包 / Start.  The right side shows the live log; when it finishes
+4. Press the Start button.  The right side shows the live log; when it finishes
    you get the A0~A7 gate table, the container size and the row counts.
 5. Untick DryRun and press Start again to install.  The previously installed
    patch is moved into out_patch\_prev_container first, so the
-   "回滚 (uninstall.ps1)" button restores exactly the pre-install state.
+   rollback button (uninstall.ps1) restores exactly the pre-install state.
 
 THEME
 -----

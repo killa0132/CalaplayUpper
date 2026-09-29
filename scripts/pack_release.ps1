@@ -9,7 +9,7 @@
 # Compress-Archive (which is what produced the published v1.1.0 assets).
 param(
     [string]$Date    = (Get-Date -Format yyyyMMdd),
-    [string]$Version = "v1.2.0",
+    [string]$Version = "v1.2.1",
     [switch]$KeepStale
 )
 

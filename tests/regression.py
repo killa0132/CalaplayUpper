@@ -29,6 +29,7 @@ import shutil
 import struct
 import subprocess
 import sys
+import tempfile
 import time
 import wave
 
@@ -44,6 +45,10 @@ REAL_GAME_DEFAULT = r"D:\CalabiyanGalgameMaker\CalaPlayer\Content\Paks"
 #: optional overrides filled in from the CLI (--exe / --kit)
 EXE_OVERRIDE = None
 KIT_DIR = None
+
+#: 图集占用实测（CP-42）的替身缓存目录：绝不让回归写进用户的 %LOCALAPPDATA%。
+#: 整轮共用一个目录 -> 167 个 MI 的实测只付一次（约 6 s）。
+CACHE_DIR = None
 
 sys.path.insert(0, ROOT)
 
@@ -548,6 +553,8 @@ def run_build(cmd_prefix, srcm, extra_args, env_extra, wipe=True, timeout=1800):
         shutil.rmtree(OUT, ignore_errors=True)
     env = os.environ.copy()
     env.update(env_extra or {})
+    if CACHE_DIR:
+        env["CALA_CACHE_DIR"] = CACHE_DIR       # 图集实测的替身缓存（绝不碰用户真实数据）
     argv = cmd_prefix + ["-Paks", FAKEGAME, "-Srcm", srcm]
     if KIT_DIR:
         argv += ["-Kit", KIT_DIR]
@@ -652,7 +659,9 @@ SCENARIOS = [
     dict(id="T26", name="-NoThumb keeps the v1 behaviour (no MI, inherited @30)",
          srcm="bgonly", args=["-DryRun", "-NoThumb"], ok=True, gates=True, post="no_thumb"),
     # ---- preview atlas: one cell per background on the game's own grid (CP-37) --------------
-    dict(id="T27", name="preview atlas: the background gets cell 165 @ (1260,1430)",
+    #      ⚠️ 格子号是**运行时实测**的（CP-42）：这一版游戏原生占 0..166（167 格，其中 166 是
+    #      一张纯黑的原生缩略图 —— 所以"黑格=空闲"的扫描法不可靠），首个空闲 = 167。
+    dict(id="T27", name="preview atlas: the background gets the first FREE cell (167 @ 1764,1430)",
          srcm="bgonly", args=["-DryRun"], ok=True, gates=True,
          gates_extra=("A9", "A9b", "A10"), post="atlas_one_tile"),
     dict(id="T28", name="-NoAtlas keeps the whole-image preview MI (CP-36 shape)",
@@ -673,6 +682,13 @@ SCENARIOS = [
     # ---- CP-41: 合并产物自动安装（core/deploy.py = install_merged.ps1 的 Python 孪生）------
     dict(id="T34", name="deploy: merged container -> backup, read back, byte-exact rollback",
          kind="deploy", srcm="ok"),
+    # ---- CP-42（2026-09-29）：图集基底修复 + 空位表运行时实测 + A9b 原生集合 -----------------
+    dict(id="T35", name="同一 out_patch 连跑两次（第二次不带 -Combined）必须成功",
+         srcm="bgonly", seed="bgonly", args=["-DryRun"], ok=True, gates=True,
+         gates_extra=("A9", "A9b", "A10"), post="repeat_run"),
+    dict(id="T36", name="write into a native-occupied cell -> A9b must go red (zero pollution)",
+         srcm="bgonly", args=["-DryRun"], env={"CALA_ATLAS_FIRST_CELL": "165"},
+         ok=False, err_has="A9b failed"),
 ]
 
 
@@ -782,8 +798,10 @@ def atlas_one_tile(tag: str) -> str:
     check(bgs, "%s the report has no background material" % tag)
     check(len(bgs) == 1, "%s expected exactly 1 background, got %d" % (tag, len(bgs)))
     m = bgs[0]
-    check(m.get("cell_index") == 165,
-          "%s cell_index is %r, expected 165 (the first free cell)" % (tag, m.get("cell_index")))
+    check(m.get("cell_index") == 167,
+          "%s cell_index is %r, expected 167 -- the first FREE cell of THIS game build "
+          "(166 is native and happens to be pure black, so a pixel scan would miss it)"
+          % (tag, m.get("cell_index")))
     check(m.get("mi_tex_obj") == "T_BackgroundPreviews",
           "%s mi_tex_obj is %r, expected the game's atlas" % (tag, m.get("mi_tex_obj")))
     sc = m.get("mi_scalars") or ""
@@ -792,8 +810,8 @@ def atlas_one_tile(tag: str) -> str:
     at = rep.get("atlas") or {}
     check(at, "%s the report has no atlas section" % tag)
     cell = (at.get("cells") or [{}])[0]
-    check((cell.get("index"), cell.get("x"), cell.get("y")) == (165, 1260, 1430),
-          "%s atlas cell is %r, expected index 165 @ (1260,1430)" % (tag, cell))
+    check((cell.get("index"), cell.get("x"), cell.get("y")) == (167, 1764, 1430),
+          "%s atlas cell is %r, expected index 167 @ (1764,1430)" % (tag, cell))
     check((at.get("blocks_changed") or 0) > 2000,
           "%s only %r BC1 blocks changed" % (tag, at.get("blocks_changed")))
     q = (at.get("quality") or [{}])[0]
@@ -808,10 +826,22 @@ def atlas_one_tile(tag: str) -> str:
     check(over == len(rep.get("da_counts") or {}) + 1,
           "%s ledger override count %d != %d DA tables + the atlas"
           % (tag, over, len(rep.get("da_counts") or {})))
-    check(rep["params"].get("max_bg") == 59,
-          "%s the reported background cap is %r, expected the atlas' 59 free cells"
+    check(rep["params"].get("max_bg") == 57,
+          "%s the reported background cap is %r, expected 57 free cells for this game build"
           % (tag, rep["params"].get("max_bg")))
-    return " | cell 165 (1260,1430), %s blocks, cell PSNR %s dB, A9/A9b/A10 PASS" % (
+    pa = rep["params"]
+    check(pa.get("atlas_first_free") == 167 and pa.get("atlas_occupied") == 167,
+          "%s measured atlas occupancy is first_free=%r occupied=%r, expected 167/167 for this "
+          "game build (if this changed, the game was updated -- re-check before trusting it)"
+          % (tag, pa.get("atlas_first_free"), pa.get("atlas_occupied")))
+    occ = pa.get("atlas_occupied_cells") or []
+    check(len(occ) == 167 and occ[0] == 0 and occ[-1] == 166,
+          "%s the measured native-cell list looks wrong: %d entries, head %r tail %r"
+          % (tag, len(occ), occ[:3], occ[-3:]))
+    check(pa.get("atlas_cells_source") in ("measured", "cache"),
+          "%s the report does not say where the atlas occupancy came from: %r"
+          % (tag, pa.get("atlas_cells_source")))
+    return " | cell 167 (1764,1430), %s blocks, cell PSNR %s dB, A9/A9b/A10 PASS" % (
         at.get("blocks_changed"), q.get("psnr_db") or q.get("psnr"))
 
 
@@ -870,10 +900,78 @@ def combined_adds(tag: str) -> str:
         len(bgs), counts.get("DA_Backgrounds"))
 
 
+def repeat_run(tag: str) -> str:
+    """D1（CP-42）：同一 out_patch 连跑两次、第二次**不带 -Combined**、素材不变 ⇒ 必须成功。
+
+    这正是 2026-09-29 用户报的那次 L2 崩溃的复现场景：旧代码在非 -Combined 的第二轮仍然拿
+    上一轮的图集当基底，而那一格里已经是同一张 tile ⇒ 写入逐字节无变化 ⇒ 撞上"图集必须有变化"
+    的守卫、整个 L2 红。
+
+    顺便在这里做 B2 的收口检查（**确定性**，不靠"反复叠到收敛"那种经验做法）：把
+    `atlas.embed` 打桩成"什么都改不了"，于是写回与基底逐字节相同 —— 这正是旧代码当成致命
+    错误、新代码必须放行并记 NOTE 的那种情形。
+    """
+    import numpy as np
+
+    from core import atlas
+
+    rep = _report()
+    bgs = [m for m in rep["materials"] if m["kind"] == "bg"]
+    check(bgs, "%s the report has no background material" % tag)
+    pa = rep["params"]
+    cell = bgs[0]["cell_index"]
+    check(cell >= (pa.get("atlas_first_free") or 0),
+          "%s the background landed on cell %r, which is inside the native range (first free = %r)"
+          % (tag, cell, pa.get("atlas_first_free")))
+    log = load_log()
+    check("byte identical" not in log,
+          "%s the second run still hit the 'byte identical' L2 failure" % tag)
+
+    root = os.path.join(OUT, "work")
+    native = None
+    for r, _d, fs in os.walk(os.path.join(root, "base")):
+        for f in fs:
+            if f == "T_BackgroundPreviews.uexp":
+                native = os.path.join(r, f)
+    check(native, "%s the build left no native atlas under work/base" % tag)
+    tile_path = bgs[0].get("tile") or ""
+    check(os.path.isfile(tile_path), "%s the build left no tile at %r" % (tag, tile_path))
+    tile = np.frombuffer(open(tile_path, "rb").read(), dtype=np.uint8).reshape(141, 250, 3)
+    occ = list(pa.get("atlas_occupied_cells") or [])
+
+    msgs = []
+    real_embed = atlas.embed
+
+    def noop_embed(data, plan, index, t, lg, stage="L1"):
+        """打桩：一块都不改（= 基底里已经放着这张 tile 的幂等重跑）。"""
+        return {"index": index, "x": 0, "y": 0, "mips": [], "blocks": 0, "changed_blocks": 0}
+
+    try:
+        atlas.embed = noop_embed
+        atlas.stage_atlas(native, os.path.splitext(native)[0] + ".uasset", [(cell, tile)],
+                          os.path.join(root, "noop_unit"),
+                          lambda _s, m: msgs.append(m), "L2", native_cells=occ)
+    finally:
+        atlas.embed = real_embed
+    check(any("already carries" in m for m in msgs),
+          "%s a byte-identical rewrite was not accepted as a no-op (NOTE missing): %r"
+          % (tag, msgs[-4:]))
+    check(not any("byte identical" in m for m in msgs),
+          "%s the no-op rewrite was still reported as a fatal error: %r" % (tag, msgs[-4:]))
+    return " | 第二轮成功；逐字节相同的空操作被放行并记 NOTE（旧代码在此必红）"
+
+
 def do_scenario(sc, cmd_prefix, state):
     h = None
     if sc.get("pre") == "lock_ucas":
-        h = lock_file(os.path.join(PAKS, "%s.ucas" % PKG))
+        # "游戏在跑"用**独占一个容器**来表达。优先锁已装的 `_P`；但干净的游戏目录里根本没有
+        # `_P`（2026-09-29 用户重装后的真机就是这样）⇒ 这时锁**原生** .ucas —— builder 的
+        # `_locked_patch_files()` 两者都认（旧写法在干净沙箱上直接报 cannot lock / err=2，
+        # 看起来像产品 bug，其实是测试的前提失效了）。
+        target = os.path.join(PAKS, "%s.ucas" % PKG)
+        if not os.path.isfile(target):
+            target = os.path.join(PAKS, "%s.ucas" % PKG.replace("_P", ""))
+        h = lock_file(target)
     try:
         return _do_scenario(sc, cmd_prefix, state)
     finally:
@@ -976,6 +1074,8 @@ def _do_scenario(sc, cmd_prefix, state):
         extra += no_atlas(tag)
     elif sc.get("post") == "combined_adds":
         extra += combined_adds(tag)
+    elif sc.get("post") == "repeat_run":
+        extra += repeat_run(tag)
     if sc.get("rollback"):
         snap_before = state["patch_before"]
         for ext in ("pak", "ucas", "utoc"):
@@ -1161,6 +1261,8 @@ def main(argv=None) -> int:
         return 0
 
     cmd_prefix = find_exe(EXE_OVERRIDE)
+    global CACHE_DIR
+    CACHE_DIR = os.path.join(tempfile.gettempdir(), "cala-regression-cache")
     print("builder : %s" % " ".join(cmd_prefix))
     if KIT_DIR:
         print("kit     : %s" % KIT_DIR)

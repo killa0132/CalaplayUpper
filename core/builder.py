@@ -33,7 +33,7 @@ import time
 from dataclasses import asdict, dataclass, field
 from typing import Dict, List, Optional, Sequence, Tuple
 
-from . import atlas, bc1, config, texture
+from . import atlas, atlas_cells, bc1, config, texture
 from .common import (BuildError, Log, ProcResult, ensure_dir, hardlink_or_copy,
                      human, reconfigure_stdio, rmtree, run, run_ok, sha16,
                      sha256_bytes, sha256_file)
@@ -42,7 +42,7 @@ from .da import (AudioRow, BgRow, append_audio_rows, append_bg_rows, append_mi_r
 from .kit import FFMPEG_HELP, Kit, load_kit
 from .wavutil import compliance, read_wav, verify_identity
 
-TOOL_VERSION = "1.2.0"
+TOOL_VERSION = "1.2.1"
 
 #: CP-40 `-ExportSrc`: the single-package pipeline also writes this build as a
 #: mergeable Mod (`<out_patch>/mod_src/<name>_src/`, see docs/MOD_MERGE_PROTOCOL.md)
@@ -150,6 +150,12 @@ class Builder:
         self.atlas_rel = ""
         self.atlas_sha256 = ""
         self.atlas_report = {}
+        # CP-42（2026-09-29）：原生图集到底占了哪些格 —— **运行时实测**，不再用常数。
+        # 空 dict 表示还没测（没有背景素材、或 -NoAtlas/-NoThumb 时可能用不上）。
+        self.native_cells: Dict[int, str] = {}
+        self.atlas_first_free = config.ATLAS_FIRST_CELL
+        self.atlas_max_bg = config.ATLAS_MAX_CELLS
+        self.atlas_cells_report: Dict = {}
 
     # ------------------------------------------------------------------ util
     def _stage(self, name: str, fn):
@@ -249,7 +255,6 @@ class Builder:
 
         self._scan_materials()
         self._check_bg_aspects()
-        self._check_limits()
 
         # stage the native containers (hardlinks: never write the game folder)
         self.native_paks = ensure_dir(os.path.join(c.work, "native_paks"))
@@ -278,6 +283,10 @@ class Builder:
             log("L0", "NOTE: -NoAtlas -> the game's preview atlas is NOT appended; every preview "
                       "MI keeps the whole-image shape (the timeline cell and the side preview "
                       "then show the native atlas tile 0,0, as before CP-37)")
+
+        # 限额检查放在图集实测**之后**：bg 上限 = 图集里实测还剩几个空位（本版游戏是 58），
+        # 只有测完才知道这一版游戏还剩几格。
+        self._check_limits()
 
         # record native hashes (proof we never touch them)
         self.native_hashes = {}
@@ -421,10 +430,39 @@ class Builder:
                       "(the game stretches an unnormalised source)" % (warned, config.TARGET_W,
                                                                        config.TARGET_H))
 
+    def _ensure_native_cells(self) -> None:
+        """实测「这一版游戏的原生图集占了哪些格」（进程内只测一次）。
+
+        跨进程靠 `core/atlas_cells` 的指纹缓存；游戏没更新时几乎零成本。测不出来会抛
+        BuildError —— 宁可停下也不要凭旧常数猜格子（猜错就是覆盖原生缩略图）。
+        """
+        if self.native_cells or not self.da_base.get("DA_Backgrounds"):
+            return
+        rep = atlas_cells.measure(self.kit, self.native_paks, self.da_base["DA_Backgrounds"],
+                                  self.c.work, self.log, "L0")
+        self.atlas_cells_report = rep
+        self.native_cells = rep["occupied"]
+        self.atlas_first_free = int(rep["first_free"])
+        self.atlas_max_bg = config.ATLAS_SLOTS - len(self.native_cells)
+        self.log("L0", "  atlas grid: %d native cell(s) occupied, first free = %d, %d free slot(s)"
+                 % (len(self.native_cells), self.atlas_first_free, self.atlas_max_bg))
+
+    def _bg_cap(self) -> int:
+        """bg 上限：显式 `CALA_MAX_BG` 覆盖 > 实测的空闲格数 > 旧常数兜底。
+
+        上限的语义就是"图集里还剩几个空位能放缩略图"，所以默认值必须来自实测；
+        `CALA_MAX_BG` 仍然最高优先（回归用它造超限场景，不依赖真实空位数）。
+        """
+        if os.environ.get("CALA_MAX_BG"):
+            return config.limit_max_bg()
+        return self.atlas_max_bg
+
     def _check_limits(self) -> None:
         c, log = self.c, self.log
         bgs = [m for m in self.materials if m.kind == config.KIND_BG]
-        cap = config.limit_max_bg()
+        if bgs:
+            self._ensure_native_cells()
+        cap = self._bg_cap()
         ok = True
         if len(bgs) > cap:
             log("L0", "LIMIT: %d background(s) > %d" % (len(bgs), cap))
@@ -667,46 +705,79 @@ class Builder:
             % (config.ATLAS_PKG, human(os.path.getsize(self.atlas_base_ux)),
                len(self.atlas_dump_sizes), self.atlas_dump_sizes))
 
-        prev = {str(pm.get("name", "")).lower(): int(pm.get("cell_index", -1))
-                for pm in self._prev_manifest.get("materials", []) if pm.get("name")}
-        taken: set = set()
-        nxt = config.ATLAS_FIRST_CELL
+        # CP-42（2026-09-29）：分配格子之前先**实测**这一版游戏占了哪些格。旧代码用的是常数
+        # （0..164 占用 ⇒ 空位 165..223 = 59 格），用户重装游戏后第 165 格已归游戏自己 ——
+        # 继续按常数分配就是往原生缩略图上写（零污染红线）。
+        self._ensure_native_cells()
+
+        # 只有 `-Combined` 才复用上一轮的格子号：非 -Combined 的运行不携带任何东西，
+        # 复用一个"上一轮碰巧用过"的号没有任何好处（还可能撞上原生新占的格子）。
+        prev = ({str(pm.get("name", "")).lower(): int(pm.get("cell_index", -1))
+                 for pm in self._prev_manifest.get("materials", []) if pm.get("name")}
+                if c.combined else {})
+        # 原生占用的格子一律视为"已取"，我们的格子只能从**实测的空位**里挑。
+        taken: set = set(self.native_cells)
+        nxt = self.atlas_first_free
+        # 测试钩子：强行把某一格分给本轮的背景（回归用它证明"往原生已占用的格子里写"
+        # 一定会被 A9b 拦下）。正常路径永远不设这个变量。
+        forced = os.environ.get("CALA_ATLAS_FIRST_CELL")
+        if forced:
+            taken.add(int(forced))
+            log("L0", "NOTE: CALA_ATLAS_FIRST_CELL=%s -> 强制指定格子（测试钩子）" % forced)
         overflow = []
         for m in bgs:
-            want = prev.get(m.name.lower(), -1)
-            if want < config.ATLAS_FIRST_CELL or want >= config.ATLAS_SLOTS or want in taken:
-                while nxt in taken:
-                    nxt += 1
-                want = nxt
-            if want >= config.ATLAS_SLOTS:
-                overflow.append(m.name)
-                m.cell_index = -1
+            if forced:
+                m.cell_index = int(forced)
                 continue
-            m.cell_index = want
-            taken.add(want)
-            nxt = max(nxt, want + 1)
-            if m.name.lower() in prev and prev[m.name.lower()] >= config.ATLAS_FIRST_CELL:
+            want = prev.get(m.name.lower(), -1)
+            if 0 <= want < config.ATLAS_SLOTS and want not in taken:
+                m.cell_index = want
+                taken.add(want)
+                nxt = max(nxt, want + 1)
                 log("L0", "  atlas cell %3d (col %2d, row %2d) reused from the previous manifest "
                           "for '%s'" % (want, want % config.ATLAS_COLS,
                                         want // config.ATLAS_COLS, m.name))
-            else:
-                log("L0", "  atlas cell %3d (col %2d, row %2d) @ (%d,%d) -> '%s'"
-                    % (want, want % config.ATLAS_COLS, want // config.ATLAS_COLS,
-                       *config.atlas_cell_xy(want), m.name))
+                continue
+            if want >= 0:
+                why = ("原生占用" if want in self.native_cells else "越界")
+                log("L0", "WARN: cell %d（上一轮给 '%s'）现在不可用（%s）⇒ 换一个空格"
+                    % (want, m.name, why))
+                c.warnings.append("上一轮给 '%s' 的图集格 %d 现在不可用（%s），本轮改用别的空格"
+                                  % (m.name, want, why))
+            while nxt in taken:
+                nxt += 1
+            if nxt >= config.ATLAS_SLOTS:
+                overflow.append(m.name)
+                m.cell_index = -1
+                continue
+            m.cell_index = nxt
+            taken.add(nxt)
+            log("L0", "  atlas cell %3d (col %2d, row %2d) @ (%d,%d) -> '%s'"
+                % (nxt, nxt % config.ATLAS_COLS, nxt // config.ATLAS_COLS,
+                   *config.atlas_cell_xy(nxt), m.name))
+            nxt += 1
         if overflow:
-            msg = ("%d background(s) have no free preview-atlas cell (the game has exactly %d): %s. "
-                   "Their preview MI keeps the whole-image shape, so their thumbnail shows the "
-                   "native atlas tile instead." % (len(overflow), config.ATLAS_MAX_CELLS,
-                                                   ", ".join(overflow[:6])))
+            msg = ("%d background(s) have no free preview-atlas cell (this build of the game has "
+                   "exactly %d free): %s. Their preview MI keeps the whole-image shape, so their "
+                   "thumbnail shows the native atlas tile instead."
+                   % (len(overflow), self.atlas_max_bg, ", ".join(overflow[:6])))
             c.warnings.append(msg)
             log("L0", "WARN: " + msg)
-        log("L0", "atlas cells assigned: %d of %d free" % (len(taken), config.ATLAS_MAX_CELLS))
+        log("L0", "atlas cells assigned: %d of %d free"
+            % (len([x for x in taken if x not in self.native_cells]), self.atlas_max_bg))
 
     def _carried_atlas(self) -> str:
         """`-Combined`: the previous build's atlas is the base (it already holds the carried cells).
 
         A fresh (non-combined) run starts from the game's own atlas instead.
+
+        ⚠️ 那个 `if not combined` 是必须的（2026-09-29 的 L2 事故）：不勾 -Combined 时
+        DA 行与图集格子都**不携带**，可 `_prev_work` 一样存在 ⇒ 若仍拿上一轮的图集当
+        基底，而上一轮往这一格写的是**同一张 tile**（同一份素材的第二次打包），写入
+        就是逐字节空操作 ⇒ 撞上"图集必须变化"的守卫、整个 L2 红。
         """
+        if not self.c.combined:
+            return ""
         prev = self.c.prev_work
         if not prev:
             return ""
@@ -958,7 +1029,8 @@ class Builder:
         base_ua = os.path.splitext(base_ux)[0] + ".uasset"
         log("L2", "preview atlas base = %s (%s)" % (base_ux, "previous build" if carried else "native"))
         rep = atlas.stage_atlas(base_ux, base_ua, cells, os.path.join(c.work, "atlas"), log, "L2",
-                                dump_sizes=self.atlas_dump_sizes)
+                                dump_sizes=self.atlas_dump_sizes,
+                                native_cells=sorted(self.native_cells))
         self.atlas_report = rep
         self.atlas_rel = (config.legacy_rel_from_pkg(config.ATLAS_PKG) + ".uasset").replace("\\", "/")
         self.atlas_sha256 = rep["sha256"]
@@ -1751,7 +1823,8 @@ class Builder:
                 # exactly the statement that a carried atlas must come back untouched.
                 plan = atlas.parse_plan(atlas_ux, log, "L4")
             idx = [m.cell_index for m in self.materials if m.cell_index >= 0]
-            v = atlas.verify(orig, newb, plan, idx, log, "L4")
+            v = atlas.verify(orig, newb, plan, idx, log, "L4",
+                             native_cells=sorted(self.native_cells))
             m0 = v["mips"][0]
             cells_txt = ("%d..%d" % (min(idx), max(idx))) if idx else "none (all carried)"
             self.gate("A9", v["a9_ok"],
@@ -1837,10 +1910,20 @@ class Builder:
         return out
 
     def _locked_patch_files(self) -> List[str]:
-        """Read-only probe: a _P file we cannot even open for writing is held by
-        another process -- almost always the game itself."""
+        """Read-only probe: containers we cannot open for writing are held by another
+        process -- almost always the game itself.
+
+        ⚠️ 除了**已装的 `_P`**，还要探**原生容器**：干净的游戏目录里根本没有 `_P`
+        （2026-09-29 用户重装后的真机就是这样），只探 `_P` 会让"游戏正在跑"这个判据整体
+        失效（回归 T14 在干净沙箱上直接报 `cannot lock ... GetLastError=2`）。`core/deploy.py`
+        的安装防护本来就是两者都探，两边判据必须一致。
+        """
         out = []
-        for _ext, p in sorted(self.c.game.patch_files.items()):
+        targets = dict(self.c.game.patch_files)
+        nat = os.path.join(self.c.game.paks_dir, "%s.ucas" % self.c.game.container_base)
+        if os.path.isfile(nat):
+            targets["native"] = nat
+        for _ext, p in sorted(targets.items()):
             try:
                 f = open(p, "rb+")
                 f.close()
@@ -2121,7 +2204,13 @@ class Builder:
                        "dry_run": c.dry_run, "combined": c.combined,
                        "no_thumb": c.no_thumb, "no_atlas": c.no_atlas,
                        "export_src": c.export_src, "src_name": c.src_name or SRC_MOD_NAME,
-                       "max_bg": config.limit_max_bg(),
+                       "max_bg": self._bg_cap(),
+                       # CP-42：图集占用的**实测**结果（旧版游戏是 165 格 / 首个空闲 165，
+                       # 2026-09-29 用户重装游戏后是 166 格 / 首个空闲 166）
+                       "atlas_first_free": self.atlas_first_free,
+                       "atlas_occupied": len(self.native_cells),
+                       "atlas_occupied_cells": sorted(self.native_cells),
+                       "atlas_cells_source": self.atlas_cells_report.get("source"),
                        "ffmpeg": c.ffmpeg, "kit": (self.kit.root if self.kit else None)},
             "resolved": {"paks_dir": (c.game.paks_dir if c.game else None),
                          "out_patch": c.out_patch, "container_base":
