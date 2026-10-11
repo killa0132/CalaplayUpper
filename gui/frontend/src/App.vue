@@ -60,6 +60,10 @@
                     :class="{ 'uv-btn-primary': mode === 'merge' }"
                     :aria-selected="mode === 'merge'"
                     @click="setMode('merge')"><ScrambleText :text="t('inputs.modeMerge')" /></button>
+            <button id="mode-char" class="uv-btn uv-btn-sm" type="button" role="tab"
+                    :class="{ 'uv-btn-primary': mode === 'character' }"
+                    :aria-selected="mode === 'character'"
+                    @click="setMode('character')"><ScrambleText :text="t('inputs.modeChar')" /></button>
           </div>
 
           <template v-if="mode === 'single'">
@@ -69,6 +73,51 @@
             <div style="height:10px"></div>
             <PathField id="srcm" v-model="form.srcm" :label="t('inputs.srcm')"
                        placeholder="D:\mytest" kind="srcm" @error="notice = $event" />
+          </template>
+
+          <template v-else-if="mode === 'character'">
+            <!-- 「添加角色模型」：Paks + 一套导出的皮肤素材 -> 新皮肤（_P2 + _P） -->
+            <PathField id="paks-char" v-model="form.paks" :label="t('inputs.paksChar')"
+                       placeholder="D:\CalabiyanGalgameMaker\CalaPlayer" kind="paks"
+                       @error="notice = $event" />
+            <div style="height:10px"></div>
+            <PathField id="skin" v-model="form.skin" :label="t('inputs.skinDir')"
+                       placeholder="E:\...\SkinAssets\Characters\Aika\S051" kind="srcm"
+                       @error="notice = $event" />
+            <div style="height:10px"></div>
+            <div class="uv-field-row">
+              <label class="uv-label" for="char-select"><ScrambleText :text="t('inputs.character')" /></label>
+              <div class="uv-field-line">
+                <select id="char-select" class="uv-field char-sel" :value="form.character"
+                        @change="form.character = $event.target.value">
+                  <option value="">{{ t('inputs.characterAuto') }}</option>
+                  <option v-for="c in characters" :key="c.name" :value="c.name">
+                    {{ c.name }}（{{ c.skins.join(' / ') }}）
+                  </option>
+                </select>
+                <button id="char-load" class="uv-btn uv-btn-sm uv-btn-ghost mods-pick" type="button"
+                        :disabled="charsLoading" @click="loadCharacters()">
+                  <ScrambleText :text="charsLoading ? t('inputs.charLoading') : t('inputs.charReload')" nowrap />
+                </button>
+              </div>
+            </div>
+            <div v-if="charsNote" class="mods-empty" id="chars-note">
+              <ScrambleText :text="charsNote" />
+            </div>
+            <div style="height:10px"></div>
+            <div class="uv-field-row">
+              <label class="uv-label" for="skin-id"><ScrambleText :text="t('inputs.skinId')" /></label>
+              <div class="uv-field-line">
+                <input id="skin-id" class="uv-field mono" type="text" spellcheck="false"
+                       maxlength="4" placeholder="S052" :value="form.skinId"
+                       @input="form.skinId = $event.target.value">
+                <input id="source-skin" class="uv-field mono" type="text" spellcheck="false"
+                       maxlength="4" :placeholder="t('inputs.sourceSkin')" :value="form.sourceSkin"
+                       :title="t('inputs.sourceSkinHint')"
+                       @input="form.sourceSkin = $event.target.value">
+              </div>
+            </div>
+            <div class="uv-label skin-hint"><ScrambleText :text="t('inputs.skinIdHint')" /></div>
           </template>
 
           <template v-else>
@@ -115,6 +164,7 @@
                       v-model:combined="form.combined" v-model:force="form.force"
                       v-model:noAtlas="form.noAtlas" v-model:exportSrc="form.exportSrc"
                       v-model:mergeDryRun="form.mergeDryRun"
+                      v-model:charDryRun="form.charDryRun"
                       v-model:ffmpeg="form.ffmpeg" v-model:kit="form.kit" />
 
         <div class="runbar">
@@ -203,8 +253,14 @@ const form = reactive({
   // merge inputs
   mods: '', out: '',
   //: CP-41：合并模式的「仅产出不安装」（默认关闭 ⇒ 合并后自动装进游戏）
-  mergeDryRun: false
+  mergeDryRun: false,
+  // 角色模型模式：素材目录 + 角色 + 皮肤 ID + 源皮肤 + 仅构建不安装
+  skin: '', character: '', skinId: '', sourceSkin: 'S001', charDryRun: false
 })
+//: 角色下拉的数据来源（GET /api/characters：只读提取 DA 后列出 20 个实装角色）
+const characters = ref([])
+const charsLoading = ref(false)
+const charsNote = ref('')
 //: the mods the Mods-root's index manifest declares (checkbox = participate)
 const modRows = ref([])
 const modsNote = ref('')
@@ -236,23 +292,30 @@ const splitRatio = ref(50)
 const saved = Number(getPref('cala-split'))
 if (saved >= 12 && saved <= 88) splitRatio.value = saved
 let es = null
-//: the stage chips follow the mode: L0..L5 for a build, M0..M7 for a merge
-//: (M7 = 把合并结果装进游戏，CP-41；勾了「仅产出不安装」时不会出现)
+//: the stage chips follow the mode: L0..L5 for a build, M0..M7 for a merge,
+//: C0..C6 for a character-skin import (C6 = 装进游戏)
 const STAGES = computed(() => (mode.value === 'merge'
   ? ['M0', 'M1', 'M2', 'M3', 'M4', 'M5', 'M6', 'M7']
-  : ['L0', 'L1', 'L2', 'L3', 'L4', 'L5']))
+  : (mode.value === 'character'
+    ? ['C0', 'C1', 'C2', 'C3', 'C4', 'C5', 'C6']
+    : ['L0', 'L1', 'L2', 'L3', 'L4', 'L5'])))
 const runLabel = computed(() => {
-  if (running.value) return mode.value === 'merge' ? t('run.merging') : t('run.running')
-  return mode.value === 'merge' ? t('run.merge') : t('run.start')
+  if (running.value) {
+    if (mode.value === 'merge') return t('run.merging')
+    return mode.value === 'character' ? t('run.importing') : t('run.running')
+  }
+  if (mode.value === 'merge') return t('run.merge')
+  return mode.value === 'character' ? t('run.importStart') : t('run.start')
 })
 
 function setMode(m) {
-  const next = m === 'merge' ? 'merge' : 'single'
+  const next = (m === 'merge' || m === 'character') ? m : 'single'
   if (next === mode.value) return next
   mode.value = next
   notice.value = ''
   noticeOpen.value = false
   if (next === 'merge' && form.mods.trim() && !modRows.value.length) loadMods()
+  if (next === 'character' && form.paks.trim() && !characters.value.length) loadCharacters()
   return next
 }
 
@@ -295,6 +358,32 @@ async function pickMods() {
     else if (r && r.debug) notice.value = t('run.dialogNoPath') + JSON.stringify(r.debug)
   } catch (e) {
     notice.value = t('run.dialogFailed') + (e.message || e)
+  }
+}
+
+/** 「添加角色模型」：只读地列出游戏里的角色（下拉的数据来源）。 */
+async function loadCharacters() {
+  charsLoading.value = true
+  charsNote.value = ''
+  characters.value = []
+  const paks = (form.paks || '').trim()
+  if (!paks) {
+    charsLoading.value = false
+    charsNote.value = t('inputs.charNeedPaks')
+    return { ok: false, count: 0 }
+  }
+  try {
+    const r = await api.listCharacters(paks, form.kit.trim())
+    characters.value = r.characters || []
+    charsNote.value = r.ok
+      ? t('inputs.charFound', characters.value.length)
+      : (r.message || t('inputs.charFound', 0))
+    return { ok: !!r.ok, count: characters.value.length, message: charsNote.value }
+  } catch (e) {
+    charsNote.value = String(e.message || e)
+    return { ok: false, count: 0, message: charsNote.value }
+  } finally {
+    charsLoading.value = false
   }
 }
 
@@ -362,6 +451,7 @@ function reset() {
 async function run() {
   if (running.value) return
   if (mode.value === 'merge') return runMerge()
+  if (mode.value === 'character') return runCharacter()
   // CP-41：单包模式也开始前先校验（缺项/路径不存在 → 错误卡片，不启动任务）
   const v = await checkInputs([], 'single')
   if (!v.ok) { showNotice(v.errors, v.warnings); return }
@@ -410,14 +500,45 @@ async function runMerge() {
   }
 }
 
-/** 开始前校验（单包 / 合并共用）——列表交给错误卡片显示，不启动任何任务。 */
+async function runCharacter() {
+  // 开始前先校验（缺项/路径不存在 → 错误卡片，不启动任务）
+  const v = await checkInputs([], 'character')
+  if (!v.ok) { showNotice(v.errors, v.warnings); return }
+  if (v.warnings && v.warnings.length) notice.value = v.warnings.join(' ')
+  reset()
+  running.value = true
+  progress.value = 4
+  try {
+    const r = await api.startCharacter({
+      paks: form.paks.trim(), skin: form.skin.trim(),
+      character: (form.character || '').trim(),
+      skin_id: (form.skinId || '').trim(),
+      source_skin: (form.sourceSkin || 'S001').trim() || 'S001',
+      kit: form.kit.trim(),
+      // 默认装进游戏；勾了「仅构建不安装」才置 true
+      dry_run: form.charDryRun
+    })
+    taskId.value = r.task_id
+    watchLogs(r.task_id)
+  } catch (e) {
+    running.value = false
+    notice.value = t('run.startFailed') + (e.message || e)
+  }
+}
+
+/** 开始前校验（单包 / 合并 / 角色共用）——列表交给错误卡片显示，不启动任何任务。 */
 async function checkInputs(picked, m) {
-  const md = m || (mode.value === 'merge' ? 'merge' : 'single')
+  const md = m || (mode.value === 'merge' ? 'merge' : mode.value)
   const body = { mode: md, paks: form.paks.trim() }
   if (md === 'merge') {
     body.mods = form.mods.trim()
     body.out = form.out.trim()
     body.select = picked || []
+  } else if (md === 'character') {
+    body.skin = form.skin.trim()
+    body.character = (form.character || '').trim()
+    body.skin_id = (form.skinId || '').trim()
+    body.source_skin = (form.sourceSkin || 'S001').trim() || 'S001'
   } else {
     body.srcm = form.srcm.trim()
   }
@@ -460,16 +581,18 @@ function watchLogs(id) {
       const rep = await api.report(id)
       const r0 = rep.report || {}
       const isMerge = mode.value === 'merge'
+      const isChar = mode.value === 'character'
       const dep = r0.deploy || null
       report.value = Object.assign({}, r0, {
         out_patch: rep.out_patch, ok: rep.ok,
         error: rep.error, da_counts: r0.da_counts,
         materials: r0.materials, seconds: r0.seconds,
-        // 单包的部署状态来自报告的 deployed；合并看 deploy 块（CP-41 自动安装）
-        deployed: isMerge ? !!(dep && dep.ok !== false) : r0.deployed,
+        // 单包的部署状态来自报告的 deployed；合并看 deploy 块（CP-41 自动安装）；
+        // 角色模型看 installed（C6 两个容器的安装记录）
+        deployed: isChar ? !!r0.installed : (isMerge ? !!(dep && dep.ok !== false) : r0.deployed),
         deploy: dep,
-        // tells the modal this was a merge
-        merge: isMerge
+        // tells the modal which flow produced this report
+        merge: isMerge, character: isChar
       })
       if (rep.ok) push(t('run.done') + (rep.out_patch || ''))
       else push(t('run.failed') + (rep.error || ''))
@@ -500,6 +623,20 @@ async function openOut() {
 
 async function rollback() {
   rollbackText.value = ''
+  // 角色模型：回滚 = 把 _P/_P2 两个容器都还原到安装前（用 C6 记下的备份目录）
+  if (mode.value === 'character') {
+    try {
+      const r = await api.charRollback(taskId.value, form.paks.trim())
+      rollbackText.value = 'rollback rc=' + r.rc + '\n' + (r.stdout || '').trim()
+      if (r.rc === 0 && report.value) {
+        report.value = Object.assign({}, report.value,
+                                     { deployed: false, rolledBack: true })
+      }
+    } catch (e) {
+      rollbackText.value = t('run.rollbackFailed') + (e.message || e)
+    }
+    return
+  }
   try {
     const r = await api.uninstall(taskId.value, form.paks.trim())
     rollbackText.value = 'uninstall.ps1 rc=' + r.rc + '\n' + (r.stdout || '').trim()
@@ -545,6 +682,11 @@ onMounted(async () => {
     getMode: () => mode.value,
     loadMods: () => loadMods(),
     modsRoot: () => modsRoot.value,
+    // 「添加角色模型」：角色下拉 + 预检，drivable by the tests
+    loadCharacters: () => loadCharacters(),
+    characters: () => characters.value.map(c => c.name),
+    charsNote: () => charsNote.value,
+    setCharacter: (name) => { form.character = name || ''; return form.character },
     setMods: (docs) => { modRows.value = (docs || []).map(d => Object.assign({ on: true }, d)); return modRows.value.length },
     toggleMod: (i, on) => { toggleMod(i, on); return !!modRows.value[i] && modRows.value[i].on },
     removeMod: (i) => { removeMod(i); return modRows.value.length },
@@ -595,6 +737,9 @@ onMounted(async () => {
       mods: modRows.value.map(m => m.name + (m.on ? ':on' : ':off')),
       modsRoot: modsRoot.value,
       mergeDryRun: form.mergeDryRun,
+      character: form.character, skinId: form.skinId, sourceSkin: form.sourceSkin,
+      charDryRun: form.charDryRun,
+      characters: characters.value.map(c => c.name),
       notice: { open: noticeOpen.value, n: noticeErrors.value.length },
       seen: { ...seen.value }, lines: lines.value.length,
       ok: report.value ? !!report.value.ok : null,
@@ -687,6 +832,11 @@ void hasReport
 .uv-field-line { display: flex; gap: 8px; align-items: center; min-width: 0; }
 .uv-field-line .uv-field { flex: 1 1 auto; min-width: 0; }
 .mods-pick { flex: none; white-space: nowrap; }
+/* 「添加角色模型」：角色下拉 + 皮肤 ID / 源皮肤两个窄输入 */
+.char-sel { flex: 1 1 auto; min-width: 0; }
+#skin-id { flex: 1.4 1 0; min-width: 0; }
+#source-skin { flex: 1 1 0; min-width: 0; }
+.skin-hint { margin-top: 8px; font-weight: 400; line-height: 1.5; opacity: .85; }
 .mods-list { display: flex; flex-direction: column; gap: 7px; min-width: 0; }
 .mods-empty { font-size: 11.5px; line-height: 1.5; color: var(--ink-dim); }
 .mod-row {

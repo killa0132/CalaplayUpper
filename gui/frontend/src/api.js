@@ -48,6 +48,23 @@ export const api = {
   // (CP-40: it also generates the index / stages `_src` folders and answers with
   // the effective `root`, which is the folder the merge will use)
   listMods(dir) { return fetch(url('/api/mods', { dir })).then(j) },
+  // 「添加角色模型」：只读列出游戏里的角色（下拉数据）；开始导入另有任务通道
+  listCharacters(paks, kit) { return fetch(url('/api/characters', { paks, kit })).then(j) },
+  startCharacter(body) {
+    return fetch(url('/api/character'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    }).then(j)
+  },
+  // 角色模型的回滚：把 _P/_P2 都还原到安装前（用 C6 记下的两份备份）
+  charRollback(taskId, paks) {
+    return fetch(url('/api/character/rollback'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ task_id: taskId, paks })
+    }).then(j)
+  },
   // pre-flight a merge: {ok, errors[], warnings[]} -- drives the error card
   validate(body) {
     return fetch(url('/api/validate'), {

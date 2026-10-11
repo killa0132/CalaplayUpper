@@ -535,6 +535,14 @@ CP-38/CP-40 追加的合并接口：`GET /api/mods?dir=`（**递归发现 Mod**�
 `POST /api/validate`（`{mods,paks,out,select[]}` → `{ok,errors[],warnings[]}`，合并前检查，喂给错误卡片）·
 `POST /api/merge`（`{mods|mod_dirs, paks, out, select[]}` → 合并任务，与构建任务共用 SSE/报告管线）。
 
+**「添加角色模型」第三模式**（v1.3.0）追加的接口：`GET /api/characters?paks=&kit=`（只读提取
+`DA_Characters` → 列出 20 个实装角色与各自已有皮肤，实现见 `gui/chars.py`）·
+`POST /api/character`（`{paks, skin, character?, skin_id?, source_skin?, dry_run?}` → 导入任务，
+走 `core/character.py` 的 `CharacterBuilder`，与 CLI `cli/import_character.py` 同一条管线；
+进度阶段 `C0..C6`，`CancelableLog` 一进 C6 就忽略取消）·
+`POST /api/character/rollback`（把 `_P`/`_P2` 都还原到安装前）。
+原理与配方见 [`CHARACTER_MODEL.md`](CHARACTER_MODEL.md)。
+
 验证（G1，一条命令）：
 
 ```powershell

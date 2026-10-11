@@ -63,14 +63,16 @@ const props = defineProps({
   exportSrc: Boolean,
   //: 合并模式专用：勾上 = 只产出容器、不写游戏目录（等于单包的 -DryRun）
   mergeDryRun: Boolean,
+  //: 角色模型模式专用：勾上 = 只构建不安装（默认关闭 ⇒ 构建完自动装进游戏）
+  charDryRun: Boolean,
   ffmpeg: String, kit: String,
   // 'single' (default) = the original packing options; 'merge' = the CP-38 merge
-  // mode, whose only "option" is the protocol's always-on strict conflict rule
+  // mode; 'character' = 「添加角色模型」(C0..C6)
   mode: { type: String, default: 'single' }
 })
 const emit = defineEmits(['update:fit', 'update:dryRun', 'update:combined', 'update:force',
                           'update:noAtlas', 'update:exportSrc', 'update:mergeDryRun',
-                          'update:ffmpeg', 'update:kit'])
+                          'update:charDryRun', 'update:ffmpeg', 'update:kit'])
 
 const advOpen = ref(false)
 
@@ -82,6 +84,12 @@ const rows = computed(() => {
               hint: t('opts.strictHint'), hard: true },
             { id: 'mergeDryRun', domId: 'opt-mergedry', label: t('opts.mergeDry'),
               hint: t('opts.mergeDryHint') }]
+  }
+  if (props.mode === 'character') {
+    // 角色模型模式：只构建不安装（默认关闭）+ Kit 路径（高级）
+    return [{ id: 'charDryRun', domId: 'opt-chardry', label: t('opts.charDry'),
+              hint: t('opts.charDryHint') },
+            { id: 'adv', domId: 'opt-adv', label: t('opts.adv'), hint: t('opts.advHint') }]
   }
   return [
     { id: 'fit', domId: 'opt-fit', label: t('opts.fit') },
@@ -102,6 +110,7 @@ function on(id) {
   if (id === 'noAtlas') return !!props.noAtlas
   if (id === 'exportSrc') return !!props.exportSrc
   if (id === 'mergeDryRun') return !!props.mergeDryRun
+  if (id === 'charDryRun') return !!props.charDryRun
   if (id === 'adv') return advOpen.value
   if (id === 'strict') return true     // the merge protocol is always strict
   return true                       // the fit row always shows a value
@@ -124,6 +133,7 @@ function onPick(item) {
   else if (item.id === 'noAtlas') emit('update:noAtlas', !props.noAtlas)
   else if (item.id === 'exportSrc') emit('update:exportSrc', !props.exportSrc)
   else if (item.id === 'mergeDryRun') emit('update:mergeDryRun', !props.mergeDryRun)
+  else if (item.id === 'charDryRun') emit('update:charDryRun', !props.charDryRun)
   else if (item.id === 'adv') advOpen.value = !advOpen.value
   // 'fit' is driven by its own <select>; 'strict' is an always-on notice
 }

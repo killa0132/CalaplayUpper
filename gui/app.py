@@ -15,6 +15,10 @@ Endpoints (see docs/2026-09-23_gui_design.md):
     POST /api/validate             pre-flight for a merge/single build -> the specific errors
     POST /api/merge                {mods, paks, out, select[]} -> one merged _P (CP-38)
                                    + 自动安装进游戏（CP-41，`dry_run` 可关）
+    GET  /api/characters           游戏里的角色清单（「添加角色模型」的下拉数据）
+    POST /api/character            {paks, skin, character?, skin_id?, source_skin?}
+                                   -> 新皮肤导入任务（C0..C6，默认装进游戏）
+    POST /api/character/rollback   把 _P/_P2 都还原到安装前
 
 Security: bound to 127.0.0.1 only AND every /api call must carry the per-run
 token (`?t=` or the `X-Cala-Token` header), so another local program cannot
@@ -44,6 +48,7 @@ if _ROOT not in sys.path:
 
 from core.builder import TOOL_VERSION  # noqa: E402
 from core import deploy as deploy_mod  # noqa: E402
+from gui import chars as chars_mod  # noqa: E402
 from gui import mods as mods_mod  # noqa: E402
 from gui import prefs  # noqa: E402
 from gui import tasks  # noqa: E402
@@ -191,6 +196,11 @@ def create_app() -> FastAPI:
         mode = str(body.get("mode") or "merge")
         if mode == "single":
             return _validate_single(str(body.get("paks") or ""), str(body.get("srcm") or ""))
+        if mode == "character":
+            return chars_mod.validate(str(body.get("paks") or ""), str(body.get("skin") or ""),
+                                      str(body.get("character") or ""),
+                                      str(body.get("skin_id") or ""),
+                                      str(body.get("source_skin") or "S001"))
         spec = str(body.get("mods") or "")
         if body.get("mod_dirs"):
             spec = ";".join(str(x) for x in (body["mod_dirs"] or []))
@@ -233,6 +243,45 @@ def create_app() -> FastAPI:
                   "dry_run": bool(body.get("dry_run"))}
         t = tasks.start_merge(params)
         return {"task_id": t.id, "params": params, "mods": got.get("mods") or []}
+
+    # ------------------------------------------------- character skin import
+    # 第三个模式「添加角色模型」：只读地列出游戏里的角色（下拉），再把
+    # `core.character.CharacterBuilder`（与 CLI 同一条管线）放进后台任务。
+    @app.get("/api/characters")
+    def list_characters(paks: str = Query(""), kit: str = Query("")) -> Dict[str, Any]:
+        return chars_mod.discover_characters(paks, kit)
+
+    @app.post("/api/character")
+    def start_character(body: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
+        paks = (body.get("paks") or "").strip()
+        skin = (body.get("skin") or "").strip()
+        if not paks or not skin:
+            raise HTTPException(400, "paks and skin are required")
+        if not os.path.isdir(skin):
+            raise HTTPException(400, "the skin folder does not exist: %s" % skin)
+        if not os.path.isdir(paks):
+            raise HTTPException(400, "the game Paks folder does not exist: %s" % paks)
+        skin_id = (body.get("skin_id") or "").strip()
+        if skin_id and not chars_mod.SKIN_RE.match(skin_id):
+            raise HTTPException(400, "skin_id must look like S052")
+        running = [t for t in tasks.all_tasks() if t["finished"] is None]
+        if running:
+            raise HTTPException(409, "a task is already running (%s); wait for it or cancel it"
+                                % running[0]["id"])
+        out = (body.get("out") or "").strip()
+        params = {
+            "paks": paks, "skin": skin,
+            "character": (body.get("character") or "").strip(),
+            "skin_id": skin_id,
+            "source_skin": (body.get("source_skin") or "S001").strip() or "S001",
+            "out": out or None,
+            "kit": body.get("kit") or None,
+            # 默认装进游戏；勾「仅构建不安装」时 dry_run=True
+            "dry_run": bool(body.get("dry_run")),
+            "keep_work": bool(body.get("keep_work")),
+        }
+        t = tasks.start_character(params)
+        return {"task_id": t.id, "params": params}
 
     # ------------------------------------------------------------------ logs
     @app.get("/api/logs/{task_id}")
@@ -521,6 +570,37 @@ def create_app() -> FastAPI:
         return {"opened": target}
 
     # ------------------------------------------------------------- rollback
+    @app.post("/api/character/rollback")
+    def character_rollback(body: Dict[str, Any] = Body(default={})) -> Dict[str, Any]:
+        """角色模型的回滚：C6 一次装了 `_P` + `_P2`，两份备份都要还原。
+
+        备份目录是 C6 通过 `core.deploy.install()` 留下的（每装一个容器一份
+        `install_backup_<时间戳>\\real_P\\`），报告里 `installed.p / installed.p2`
+        记着它们的位置。
+        """
+        t = tasks.get(body.get("task_id") or "")
+        paks = body.get("paks") or (t.params.get("paks") if t else "") or ""
+        rep = ((t.report if t else None) or {})
+        inst = rep.get("installed") or {}
+        if not inst:
+            raise HTTPException(400, "这次任务没有安装记录（勾了「仅构建不安装」？）")
+        target = ((inst.get("p") or {}).get("target")) or paks
+        if not target or not os.path.isdir(target):
+            raise HTTPException(400, "找不到安装目标目录：%s" % target)
+        msgs = []
+        for key, base in (("p", "CalaPlayer-Windows_P"), ("p2", "CalaPlayer-Windows_P2")):
+            info = inst.get(key) or {}
+            bk = info.get("backup")
+            if bk and os.path.isdir(bk):
+                try:
+                    deploy_mod.rollback(bk, target, base=base)
+                except Exception as e:  # noqa: BLE001
+                    raise HTTPException(500, "回滚 %s 失败：%s" % (base, str(e) or type(e).__name__))
+                msgs.append("%s <- %s" % (base, bk))
+        if not msgs:
+            raise HTTPException(400, "没有可用的备份目录")
+        return {"rc": 0, "stdout": "已回滚到安装前：\n" + "\n".join(msgs), "stderr": ""}
+
     @app.post("/api/uninstall")
     def uninstall(body: Dict[str, Any] = Body(default={})) -> Dict[str, Any]:
         """回滚 = 跑构建/合并产物里已经准备好的回滚素材，GUI 里没有新的回滚逻辑。

@@ -61,6 +61,13 @@
           <div>{{ t('gates.deployTo') }}{{ rep.deploy.target }}</div>
           <div v-if="rep.deploy.backup">{{ t('gates.backupDir') }}{{ rep.deploy.backup }}</div>
         </div>
+        <!-- 角色模型：「加好了，装到哪、备份在哪」 -->
+        <div v-if="isChar && rep.installed && !rep.rolledBack" class="errbox ok2" id="deploy-box-char">
+          <div>{{ t('gates.charInstalled', rep.character || '', rep.skin || '') }}</div>
+          <div v-if="rep.installed.p">{{ t('gates.deployTo') }}{{ rep.installed.p.target }}</div>
+          <div v-if="rep.installed.p && rep.installed.p.backup">{{ t('gates.backupDir') }}{{ rep.installed.p.backup }}</div>
+          <div v-if="rep.installed.p2 && rep.installed.p2.backup">{{ t('gates.backupDir') }}{{ rep.installed.p2.backup }}</div>
+        </div>
         <div v-if="rollbackText" id="rollback-text" class="errbox ok2">{{ rollbackText }}</div>
       </template>
     </div>
@@ -92,15 +99,20 @@ const props = defineProps({
 defineEmits(['open-out', 'rollback'])
 
 const isMerge = computed(() => props.mode === 'merge')
+const isChar = computed(() => props.mode === 'character')
 //: 能不能真的回滚：单包 = 这次真的部署过（`deployed`）；合并 = 报告里有安装块
-//: （CP-41 自动安装留下的 `install_backup_*`）。两者都不是时按钮**置灰**。
+//: （CP-41 自动安装留下的 `install_backup_*`）；角色模型 = 报告里有 `installed`
+//: （C6 把两个容器的备份目录都记下来了）。都不是时按钮**置灰**。
 //: 已经回滚过（`rolledBack`）就没有东西可回滚了 —— 也得置灰。
 const canRollback = computed(() => !!props.rep && !props.rep.rolledBack
                           && (!!props.rep.deployed
+                              || (!!props.rep.installed && !!(props.rep.installed.p
+                                  || props.rep.installed.p2))
                               || (!!props.rep.deploy && props.rep.deploy.ok !== false)))
 const rollbackHint = computed(() => {
   if (!props.rep) return ''
   if (canRollback.value) {
+    if (isChar.value) return t('gates.rollbackCharHint')
     return isMerge.value ? t('gates.rollbackMergeHint') : t('gates.rollbackHint')
   }
   return t('gates.rollbackOff')
@@ -133,6 +145,8 @@ function glowOff(e) {
 
 const gateRows = computed(() => {
   const g = (props.rep && props.rep.gates) || {}
+  // 单包/合并的 gates 是 {A0:{ok,detail}} 字典；角色模型的是 [{id,ok,detail}] 列表
+  if (Array.isArray(g)) return g.map(x => ({ id: x.id, ok: !!x.ok, detail: x.detail || '' }))
   return Object.keys(g).sort().map(k => ({ id: k, ok: !!g[k].ok, detail: g[k].detail || '' }))
 })
 const da = computed(() => {

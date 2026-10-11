@@ -8,6 +8,30 @@
 
 ## 未发布 / Unreleased
 
+### 新增：GUI 的「添加角色模型」第三模式（角色皮肤导入）
+
+* 左侧输入卡顶部第三个 Tab：**添加角色模型**。选游戏 Paks 目录 + 一套导出的皮肤素材
+  （如 `...\Characters\Aika\S051`）→ 选角色（下拉会**只读地**提取一次 `DA_Characters`
+  列出 20 个实装角色）→ 填新皮肤 ID（可留空自动挑号）→ 点「开始导入」。
+* 全链路自动化（进度条 `C0..C6`）：提取角色基线 → 素材 PNG 匹配源贴图 → **数据驱动**
+  地选出"引用了被替换贴图的材质"并连同它们引用的全部贴图一起重建（杜绝断链）→
+  网格/材质/贴图全部**纯同长字节替换**（绝不新增 import / 改表结构）→
+  贴图按声明格式重编码（`PF_BC7` 自动做声明修复，见《皮肤贴图正确显示_修复记录》阶段①）→
+  `DA_Characters` 名称链式 addname + 克隆源皮肤条目 → 双容器打包 → 安装。
+* 双容器语义：`_P2` 承载新皮肤（to-zen 完整头部，游戏挂载时合并注册包名）；
+  `_P` **只换 `DA_Characters` 一个 chunk**（`unpack-raw`/`pack-raw` 字节级，其余 chunk 原样）——
+  用户以前装的背景/音频/剧情编辑器补丁**不受影响**；已存在的 `_P2` 会先并入再叠加。
+* 安装沿用既有约定（先 `_P` 后 `_P2`，各自备份 → 写入 → 逐文件读回 sha256 → 任一步失败自动还原
+  并回滚另一个）；结果面板右下角「回滚」会把两个容器一起还原到安装前。
+* 本版实测（2026-10-11）：`Aika` + `S051` 素材 → `S052`，6 张贴图重编码（DXT1/DXT5/BC5，
+  `body_2_D` 自动 BC7→DXT5）、18 个材质、10 个 DA 槽位、`_P2` 88→119 chunk 全量保留、
+  游戏启动无 SkipPackage、贴图从容器完整解析（12 级 mip）。
+* 后端：新增 `GET /api/characters`（角色清单）、`POST /api/character`（导入任务）、
+  `POST /api/character/rollback`（双容器回滚）；新增 `core/character.py`、`core/char_da.py`、
+  `core/char_kit.py`、`core/bcn.py`、`cli/import_character.py`、`gui/chars.py`。
+  **`core/builder.py` / `core/merger.py` / `core/da.py` / `core/kit.py` 等既有引擎文件一个字节都没改。**
+* 文档：[`docs/CHARACTER_MODEL.md`](docs/CHARACTER_MODEL.md)（原理、配方、边界、回滚）。
+
 ### 新增：GUI 的「多 Mod 合并」局部切换（CP-39）
 
 * 左侧「素材与游戏 / INPUTS」卡片顶部新增两个小 Tab：**单包打包**（默认，界面与行为保持原样）/ **多 Mod 合并**。

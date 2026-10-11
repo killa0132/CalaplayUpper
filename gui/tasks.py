@@ -29,6 +29,7 @@ if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
 from core.builder import Builder, Ctx  # noqa: E402
+from core.character import CharCtx, CharacterBuilder  # noqa: E402
 from core.common import BuildError, Log  # noqa: E402
 from core.deploy import DEFAULT_BASE as DEPLOY_BASE, install as deploy_install  # noqa: E402
 from core.merger import merge_mods  # noqa: E402
@@ -62,8 +63,8 @@ class CancelableLog(Log):
 
     def __call__(self, stage: str, msg: str = "") -> None:
         super().__call__(stage, msg)
-        if stage in ("L5", "M7"):
-            # 部署（单包 L5 / 合并 M7）必须是原子的：到这里就不再理会取消
+        if stage in ("L5", "M7", "C6"):
+            # 部署（单包 L5 / 合并 M7 / 角色 C6）必须是原子的：到这里就不再理会取消
             self._armed = False
         self._check()
 
@@ -94,12 +95,13 @@ class Task:
         self.buffer.append(line)
         self.queue.put({"kind": "line", "line": line})
         # stage tracking for the progress bar: "[ts] [L2] message" for a single
-        # build, "[ts] [M3] message" for a mod merge (CP-38)
+        # build, "[ts] [M3] message" for a mod merge (CP-38), "[ts] [C3] message"
+        # for a character-skin import
         try:
             parts = line.split("] [")
             if len(parts) >= 2:
                 st = parts[1].split("]")[0].strip()
-                if len(st) >= 2 and st[0] in "LM" and st[1:].isdigit() and st != self.stage:
+                if len(st) >= 2 and st[0] in "LMC" and st[1:].isdigit() and st != self.stage:
                     self.stage = st
                     self.queue.put({"kind": "stage", "stage": st, "line": line})
         except Exception:  # noqa: BLE001
@@ -168,6 +170,79 @@ def start_merge(params: Dict[str, Any]) -> Task:
                                    name="cala-merge-%s" % tid, daemon=True)
     task.thread.start()
     return task
+
+
+def start_character(params: Dict[str, Any]) -> Task:
+    """Create a task and run an "add character skin" import in a worker thread.
+
+    Same contract as the other two modes: the GUI builds the SAME
+    `core.character.CharacterBuilder` the CLI builds -- it never re-implements
+    the pipeline.  Deployment (C6) is atomic: cancellation stops working once
+    the first C6 line appears.
+    """
+    tid = uuid.uuid4().hex[:12]
+    task = Task(id=tid, params=dict(params))
+    with _LOCK:
+        _TASKS[tid] = task
+    task.thread = threading.Thread(target=_run_character, args=(task,),
+                                   name="cala-char-%s" % tid, daemon=True)
+    task.thread.start()
+    return task
+
+
+# --------------------------------------------------------------------------
+def _run_character(task: Task) -> None:
+    """「添加角色模型」的 worker：调 `core.character.CharacterBuilder`（与 CLI 同一条管线）。"""
+    p = task.params
+    skin = os.path.abspath(p["skin"])
+    out = os.path.abspath(p.get("out") or os.path.join(os.path.dirname(skin), "out_character"))
+    os.makedirs(out, exist_ok=True)
+    log = CancelableLog(path=os.path.join(out, "import_character.log"), echo=False,
+                        cancel=task.cancel)
+    log.add_sink(task.push)
+    task.out_patch = out
+    ctx = CharCtx(paks_arg=p["paks"], src_dir=skin, out_dir=out,
+                  character=p.get("character") or "", skin_id=p.get("skin_id") or "",
+                  source_skin=p.get("source_skin") or "S001",
+                  kit_arg=p.get("kit") or "",
+                  dry_run=bool(p.get("dry_run")), no_deploy=bool(p.get("dry_run")),
+                  keep_work=bool(p.get("keep_work")))
+    b = CharacterBuilder(ctx, log)
+    try:
+        rep = b.run()
+        task.ok = True
+        task.report = rep
+        task.error = None
+        # 角色清单缓存作废：下次点「读取角色列表」要能看到刚导入的新皮肤
+        try:
+            from gui import chars as chars_mod
+            chars_mod.invalidate(p["paks"])
+        except Exception:  # noqa: BLE001
+            pass
+    except BuildCanceled as e:
+        task.ok = False
+        task.error = "已取消（取消发生在部署之前，游戏目录未被改动）/ canceled: %s" % e
+        task.report = {"ok": False, "error": task.error, "gates": b.gates}
+    except BuildError as e:
+        task.ok = False
+        task.error = str(e)
+        task.report = {"ok": False, "error": task.error, "gates": b.gates}
+    except Exception as e:  # noqa: BLE001
+        import traceback
+        task.ok = False
+        task.error = "%s: %s" % (type(e).__name__, e)
+        try:
+            log.raw(traceback.format_exc())
+        except Exception:  # noqa: BLE001
+            pass
+        task.report = {"ok": False, "error": task.error, "gates": b.gates}
+    finally:
+        task.finished = time.time()
+        log.close()
+        task.push_event("done", {"ok": bool(task.ok), "error": task.error,
+                                 "out_patch": task.out_patch,
+                                 "seconds": round(task.finished - task.started, 2)})
+        task.done.set()
 
 
 # --------------------------------------------------------------------------
